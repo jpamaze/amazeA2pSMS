@@ -46,6 +46,16 @@ make test   # unit + integration; integration tests skip when Redis/Postgres are
 
 Integration tests use `REDIS_TEST_ADDR` (default `localhost:6379`) and `POSTGRES_TEST_URL` (default `postgres://sms:sms@localhost:5432/sms_test`). **The test database is wiped on every run.**
 
+## Applying a bundle from a Claude session
+
+Claude sessions that cannot push hand over a git bundle. On the main dev machine the repo is `D:\ZAPIM\SMPP\amazeA2pSMS` and the bundle is saved as `D:\ZAPIM\SMPP\amazeA2pSMS.bundle`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\ZAPIM\SMPP\amazeA2pSMS\scripts\sync-from-bundle.ps1
+```
+
+The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` to skip the push, or `-RepoPath` / `-BundlePath` to use other paths.
+
 ## Next: Phase 1, Core messaging (weeks 5–16)
 
 SMPP PDU codec and customer binds, HTTP send, vendor SMPP and HTTP connectors with per-vendor TLV profiles, basic routing, DLR journal and delivery, ClickHouse writer, SMPP simulator, 5,000 TPS load-test gate.
