@@ -39,11 +39,16 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '422':
-          description: DLT check failed (unregistered header, template mismatch, URL not whitelisted, outside promotional hours)
+          description: No rate for this destination on the account's rate card (DLT check failures will also use 422 from phase 3)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/Error' }
+        '503':
+          description: Temporarily unavailable; nothing was charged and it is safe to retry with the same Idempotency-Key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sms/{id}:
     get:
       summary: Message status
@@ -86,21 +91,27 @@ components:
         template_id: { type: string, description: DLT template ID; detected automatically when omitted }
         tm_chain: { type: string, description: PE-TM chain value; platform default used when omitted }
         client_ref: { type: string, maxLength: 64 }
-        callback_url: { type: string, format: uri }
     SendResponse:
       type: object
       properties:
         id: { type: string, format: uuid }
         segments: { type: integer }
         cost: { type: string, description: 'Decimal, 4 places, INR' }
-        template_id: { type: string }
+        status: { type: string, enum: [accepted] }
+        duplicate: { type: boolean, description: 'true when the Idempotency-Key was seen before; id is the original message' }
     MessageStatus:
       type: object
       properties:
         id: { type: string, format: uuid }
-        status: { type: string, enum: [accepted, rejected, routed, submitted, delivered, failed, expired] }
-        error_code: { type: string }
-        updated_at: { type: string, format: date-time }
+        status: { type: string, enum: [accepted, rejected, submitted, delivered, failed, expired] }
+        error_code: { type: string, description: 'NO_ROUTE, SMPP_<status>, <STAT>:<err> from the operator, NO_DLR' }
+        to: { type: string }
+        sender: { type: string }
+        segments: { type: integer }
+        cost: { type: string }
+        client_ref: { type: string }
+        accepted_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
     Wallet:
       type: object
       properties:
@@ -113,5 +124,5 @@ components:
     Error:
       type: object
       properties:
+        code: { type: string, description: 'invalid_json, invalid_request, invalid_destination, invalid_sender, invalid_text, insufficient_balance, no_rate, throttled, unauthorized, not_found, unavailable' }
         error: { type: string }
-        code: { type: string }

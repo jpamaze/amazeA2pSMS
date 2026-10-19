@@ -5,18 +5,24 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/auth"
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
+	"github.com/jpamaze/amazeA2pSMS/internal/edge/httpapi"
+	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
+	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
 )
 
 type apiConfig struct {
-	Addr string `env:"HTTP_ADDR" envDefault:":8080"`
+	Addr       string `env:"HTTP_ADDR" envDefault:":8080"`
+	AccountTPS int    `env:"HTTP_ACCOUNT_TPS" envDefault:"200"`
 }
 
 func main() {
@@ -25,24 +31,23 @@ func main() {
 		if err := env.Parse(&ac); err != nil {
 			return fmt.Errorf("http-api config: %w", err)
 		}
-		mux := http.NewServeMux()
-		// TODO(phase 1, api/openapi.yaml): API-key auth, per-account token bucket,
-		// DLT field check, wallet.Hold, produce to kafka.TopicSubmit, 202.
-		mux.HandleFunc("POST /v1/sms", notImplemented)
-		mux.HandleFunc("GET /v1/sms/{id}", notImplemented)
-		mux.HandleFunc("GET /v1/wallet", notImplemented)
-
+		store := msgstore.New(d.Redis)
+		wallets := wallet.New(d.Redis)
+		api := &httpapi.API{
+			Keys: auth.New(d.PG),
+			Accept: &ingest.Pipeline{
+				Pricer: pricing.NewCached(d.PG, time.Minute), Wallets: wallets,
+				Store: store, Redis: d.Redis, Kafka: d.Kafka,
+			},
+			Store: store, Wallets: wallets, Log: d.Log, AccountTPS: ac.AccountTPS,
+		}
 		d.Log.Info("http api listening", "addr", ac.Addr)
 		return service.ServeHTTP(ctx, &http.Server{
 			Addr:              ac.Addr,
-			Handler:           mux,
+			Handler:           api.Handler(),
 			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
 		})
 	})
-}
-
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented yet"})
 }

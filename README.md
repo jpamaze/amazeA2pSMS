@@ -2,7 +2,7 @@
 
 A carrier-grade A2P SMS platform: customer SMPP (3.3/3.4/5.0) and HTTP in, vendor SMPP and HTTP out, built for 5,000 TPS sustained and 10,000 burst. Launching in India with full DLT.
 
-Status: **Phase 0, Foundations.** The services start, report health, and consume their Kafka topics. The SMPP protocol, routing, DLT matching and connectors are stubs marked `TODO(phase N)`. Built and tested so far: wallet holds, credit limits with the reseller rules, and the database schema.
+Status: **Phase 1, Core messaging, slice 1.** Messages go end to end: customer SMPP or HTTP → Kafka → router → vendor SMPP connector → delivery receipt back to the customer, with wallet holds and ledger charges. Tested at 4,859 accepted TPS on a single 4-core box with zero loss. See [docs/phase1-core-messaging.md](docs/phase1-core-messaging.md) for what is built, the test results and what comes next.
 
 ## Layout
 
@@ -10,8 +10,14 @@ Status: **Phase 0, Foundations.** The services start, report health, and consume
 | --- | --- |
 | `cmd/smpp-server`, `cmd/http-api` | Customer edges: auth, limits, balance hold, write to Kafka |
 | `cmd/admin-api` | Accounts, config, credit limits (`PUT /v1/accounts/{id}/credit-limit`, dev only until auth) |
-| `cmd/router`, `cmd/rater`, `cmd/dlr-processor`, `cmd/connector` | Kafka consumers on the message path |
+| `cmd/router` | Picks a vendor (LCR / priority / weighted) |
+| `cmd/connector` | Outbound SMPP binds to one vendor (`VENDOR_ID`), DLR journal |
+| `cmd/dlr-processor` | Matches DLRs, message state, customer receipts, expiry of messages with no DLR |
+| `cmd/rater` | Settles holds, writes the ledger in batches |
 | `cmd/migrate` | Applies `migrations/postgres` |
+| `cmd/devkafka`, `cmd/smpp-sim`, `cmd/smpp-load`, `cmd/devseed` | Dev tools: in-memory Kafka, vendor simulator, load generator, demo data |
+| `internal/smpp/{pdu,session,gsm7}` | Own SMPP 3.3/3.4/5.0 library and GSM-7/UCS-2 encoding |
+| `internal/ingest`, `internal/msgstore`, `internal/routing`, `internal/connector`, `internal/dlr` | Message path packages |
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
 | `internal/billing/credit` | Credit limit changes (platform: any account; reseller: own sub-accounts within its balance) |
 | `internal/platform/*` | Config, logging, health, metrics, Kafka, Redis, PostgreSQL |
@@ -22,21 +28,33 @@ Status: **Phase 0, Foundations.** The services start, report health, and consume
 
 ## Run locally
 
-Requires Go 1.26+ and Docker.
+With Docker (Go not needed on the host):
 
 ```sh
-make up          # postgres, redis, redpanda, clickhouse, topics, migrate, all services
-curl localhost:9103/readyz   # admin-api readiness (ops ports 9101-9107)
+make up                       # postgres, redis, redpanda, clickhouse, simulator, seed, all services
+docker compose -f deploy/docker-compose.yml logs seed   # prints the demo HTTP API key
 make down
 ```
 
-Without Docker, against local Postgres and Redis:
+Without Docker (Linux, WSL or macOS; needs Go 1.26+, PostgreSQL with database `sms` for user sms/sms, Redis on 6379). This wipes the `sms` database and Redis:
 
 ```sh
-export POSTGRES_URL=postgres://sms:sms@localhost:5432/sms?sslmode=disable
-make migrate
-APP_ENV=dev go run ./cmd/admin-api
+scripts/dev-local.sh up       # builds, starts in-memory Kafka, simulator, all services, seeds demo data
+TPS=2000 scripts/dev-local.sh load
+scripts/dev-local.sh down
 ```
+
+Then send a message:
+
+```sh
+# SMPP: bind to localhost:2775 as system_id=demo password=demo123
+# HTTP:
+curl -X POST localhost:8080/v1/sms -H "X-API-Key: <key from seed output>" \
+  -d '{"to":"+919812345678","sender":"AMZTST","text":"Your OTP is 482913","pe_id":"1101234567890123456","template_id":"1107160000000012345"}'
+curl localhost:8080/v1/sms/<id> -H "X-API-Key: <key>"
+```
+
+Ports: SMPP 2775, HTTP 8080, admin 8081, simulator 2776, ops (`/healthz`, `/readyz`, `/metrics`) 9101–9107.
 
 ## Test
 
@@ -56,6 +74,6 @@ powershell -ExecutionPolicy Bypass -File D:\ZAPIM\SMPP\amazeA2pSMS\scripts\sync-
 
 The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` to skip the push, or `-RepoPath` / `-BundlePath` to use other paths.
 
-## Next: Phase 1, Core messaging (weeks 5–16)
+## Next: Phase 1, slice 2
 
-SMPP PDU codec and customer binds, HTTP send, vendor SMPP and HTTP connectors with per-vendor TLV profiles, basic routing, DLR journal and delivery, ClickHouse writer, SMPP simulator, 5,000 TPS load-test gate.
+HTTP vendor connector, customer webhooks, ClickHouse writer, admin top-ups that load wallets into Redis, cross-node bind limits, and the 5,000 TPS gate on production-shaped hardware.

@@ -118,6 +118,22 @@ services:
       VENDOR_ID: sim
     ports: ["9107:9090"]
 
+  # Fake vendor SMSC that answers submits and sends delivery receipts.
+  smpp-sim:
+    build: { context: .., args: { SERVICE: smpp-sim } }
+    command: ["-addr", ":2776", "-dlr-delay", "200ms", "-fail", "0.02"]
+    ports: ["2776:2776"]
+
+  # Demo account, credentials, rate card, simulator vendor and route.
+  # Prints the HTTP API key: docker compose logs seed
+  seed:
+    <<: *service
+    build: { context: .., args: { SERVICE: devseed } }
+    command: ["-sim-host", "smpp-sim", "-sim-port", "2776"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: "no"
+
 volumes:
   pgdata:
   chdata:

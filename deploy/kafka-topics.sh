@@ -18,6 +18,7 @@ H72=$((72 * 3600 * 1000))
 D7=$((7 * 24 * 3600 * 1000))
 
 create sms.submit          "$PARTITIONS" "$H72"
+create sms.status          "$PARTITIONS" "$H72"
 create sms.dlr             "$PARTITIONS" "$H72"
 create sms.mo              "$PARTITIONS" "$H72"
 create sms.billing.events  "$PARTITIONS" "$D7"

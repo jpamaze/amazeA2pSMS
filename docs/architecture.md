@@ -5,23 +5,35 @@ The full blueprint (design targets, stack, capacity, roadmap) is the "New SMS Pl
 ## Message path
 
 ```
-Customer SMPP ─▶ smpp-server ─┐                         ┌─▶ router ──▶ sms.route.<vendor> ─▶ connector ─▶ vendor
-Customer HTTP ─▶ http-api ────┴─▶ sms.submit (Kafka) ───┤
-                                                        └─ (hold placed in Redis before produce)
-vendor DLR/MO ─▶ connector ─▶ sms.dlr / sms.mo ─▶ dlr-processor ─▶ customer (deliver_sm / webhook)
-holds, settles ─▶ sms.billing.events ─▶ rater ─▶ PostgreSQL ledger (batched)
-all records ─▶ ClickHouse message_records
+Customer SMPP ─▶ smpp-server ─┐  hold + state in Redis, then
+Customer HTTP ─▶ http-api ────┴─▶ sms.submit ─▶ router ─▶ sms.route.<vendor> ─▶ connector ─▶ vendor
+                                                  │ no route                      │ submitted / failed
+                                                  ▼                               ▼
+                                              sms.status ◀────────────────────────┘
+                                                  │
+                         ┌────────────────────────┴───────────────────────┐
+                         ▼                                                ▼
+                 rater: settle/release hold,                    dlr-processor: message state
+                 ledger batch to PostgreSQL                     ▲            │ final status
+                                                                │            ▼
+vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────────────────┘   custdlr:{account} stream (Redis)
+                                                                             │
+                                               smpp-server ◀─────────────────┘ deliver_sm to RX/TRX binds
 ```
 
 | Service | Reads | Writes | Stores |
 | --- | --- | --- | --- |
-| smpp-server | customer binds | `sms.submit` | Redis (holds, limits), PG (credentials) |
+| smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices) |
 | http-api | REST | `sms.submit` | Redis, PG |
-| admin-api | REST | `sms.config.changes` | PG, Redis |
-| router | `sms.submit` | `sms.route.<vendor>`, `sms.billing.events` | Redis (HLR cache), in-memory config |
-| connector | `sms.route.<vendor>` | `sms.dlr`, `sms.mo` | Redis (vendor msg ID map) |
-| dlr-processor | `sms.dlr`, `sms.mo` | `sms.billing.events` | Redis, ClickHouse |
-| rater | `sms.billing.events` | — | PG ledger, Redis wallet |
+| admin-api | REST | — | PG, Redis |
+| router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, refreshed from PG |
+| connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
+| dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}` | Redis |
+| rater | `sms.status` | — | Redis wallet, PG ledger + `rater_offsets` |
+
+Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency).
+
+Billing: the customer is charged when the vendor accepts a message (`submitted`, or `failed` after at least one part was accepted) and the hold is released when the platform rejects it or no part was accepted.
 
 ## Reliability rules
 
@@ -33,7 +45,7 @@ all records ─▶ ClickHouse message_records
 6. Config is read from memory, refreshed from `sms.config.changes`; never queried per message.
 7. Per-bind limits for customer and vendor binds (`smpp_credentials`, `vendor_binds`).
 8. Automatic vendor failover on errors, latency or DLR rate.
-9. Hourly reconciliation of messages stuck in `submitted` past `vendors.dlr_timeout`.
+9. Reconciliation: messages still in `submitted` after `DLR_TIMEOUT` are expired and the customer gets an EXPIRED receipt.
 10. No single points of failure; `/readyz` checks every dependency (`platform/health`).
 
 ## Ops endpoints
