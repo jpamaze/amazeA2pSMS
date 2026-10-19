@@ -1,0 +1,123 @@
+# Local development stack. Start with `make up`.
+name: amaze-sms
+
+x-service: &service
+  build:
+    context: ..
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    redpanda: { condition: service_healthy }
+  environment: &env
+    APP_ENV: dev
+    LOG_LEVEL: debug
+    POSTGRES_URL: postgres://sms:sms@postgres:5432/sms?sslmode=disable
+    REDIS_ADDRS: redis:6379
+    KAFKA_BROKERS: redpanda:9092
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sms
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sms"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda start --mode dev-container --smp 1
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports: ["19092:19092"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      retries: 30
+
+  topics:
+    image: redpandadata/redpanda:v24.2.7
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "/topics.sh"]
+    environment:
+      BROKERS: redpanda:9092
+      VENDORS: sim
+    volumes: ["./kafka-topics.sh:/topics.sh:ro"]
+    restart: "no"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DB: sms
+      CLICKHOUSE_USER: sms
+      CLICKHOUSE_PASSWORD: sms
+    ports: ["8123:8123", "9000:9000"]
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ../migrations/clickhouse:/docker-entrypoint-initdb.d:ro
+
+  migrate:
+    <<: *service
+    build: { context: .., args: { SERVICE: migrate } }
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  smpp-server:
+    <<: *service
+    build: { context: .., args: { SERVICE: smpp-server } }
+    ports: ["2775:2775", "9101:9090"]
+
+  http-api:
+    <<: *service
+    build: { context: .., args: { SERVICE: http-api } }
+    ports: ["8080:8080", "9102:9090"]
+
+  admin-api:
+    <<: *service
+    build: { context: .., args: { SERVICE: admin-api } }
+    ports: ["8081:8081", "9103:9090"]
+
+  router:
+    <<: *service
+    build: { context: .., args: { SERVICE: router } }
+    ports: ["9104:9090"]
+
+  rater:
+    <<: *service
+    build: { context: .., args: { SERVICE: rater } }
+    ports: ["9105:9090"]
+
+  dlr-processor:
+    <<: *service
+    build: { context: .., args: { SERVICE: dlr-processor } }
+    ports: ["9106:9090"]
+
+  connector-sim:
+    <<: *service
+    build: { context: .., args: { SERVICE: connector } }
+    environment:
+      <<: *env
+      VENDOR_ID: sim
+    ports: ["9107:9090"]
+
+volumes:
+  pgdata:
+  chdata:

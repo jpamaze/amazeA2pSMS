@@ -1,0 +1,117 @@
+openapi: 3.1.0
+info:
+  title: Amaze A2P SMS - Customer API
+  version: 0.1.0
+  description: |
+    Customer HTTP API. A 202 means the message is durably queued and its cost
+    is held against wallet balance + credit limit. Delivery status arrives by
+    webhook or GET /v1/sms/{id}.
+servers:
+  - url: https://api.example.com
+security:
+  - apiKey: []
+paths:
+  /v1/sms:
+    post:
+      summary: Send one SMS
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string, maxLength: 64 }
+          description: Same key within 72 h returns the original result instead of sending again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendRequest' }
+      responses:
+        '202':
+          description: Accepted and queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '402':
+          description: Insufficient balance (wallet + credit limit - holds < cost)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: DLT check failed (unregistered header, template mismatch, URL not whitelisted, outside promotional hours)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/sms/{id}:
+    get:
+      summary: Message status
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageStatus' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/wallet:
+    get:
+      summary: Wallet balance and credit
+      responses:
+        '200':
+          description: Wallet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Wallet' }
+components:
+  securitySchemes:
+    apiKey: { type: apiKey, in: header, name: X-API-Key }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    SendRequest:
+      type: object
+      required: [to, sender, text, pe_id]
+      properties:
+        to: { type: string, description: 'E.164, e.g. +919812345678' }
+        sender: { type: string, description: DLT-registered header }
+        text: { type: string }
+        pe_id: { type: string, description: DLT Principal Entity ID }
+        template_id: { type: string, description: DLT template ID; detected automatically when omitted }
+        tm_chain: { type: string, description: PE-TM chain value; platform default used when omitted }
+        client_ref: { type: string, maxLength: 64 }
+        callback_url: { type: string, format: uri }
+    SendResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        segments: { type: integer }
+        cost: { type: string, description: 'Decimal, 4 places, INR' }
+        template_id: { type: string }
+    MessageStatus:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [accepted, rejected, routed, submitted, delivered, failed, expired] }
+        error_code: { type: string }
+        updated_at: { type: string, format: date-time }
+    Wallet:
+      type: object
+      properties:
+        currency: { type: string, example: INR }
+        balance: { type: string, description: May be negative when credit is used }
+        credit_limit: { type: string, description: Defaults to 0 }
+        held: { type: string }
+        available: { type: string, description: balance + credit_limit - held }
+        credit_used: { type: string }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string }
