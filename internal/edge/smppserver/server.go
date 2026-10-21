@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
@@ -245,6 +247,7 @@ func (s *Server) bind(sess *session.Session, req *pdu.PDU) {
 		respBody.TLVs.Set(pdu.TagSCInterfaceVersion, []byte{pdu.V34})
 	}
 	_ = sess.Respond(req, pdu.StatusOK, respBody)
+	metrics.CustomerBinds.Inc()
 	s.log.Info("bound", "system_id", cred.SystemID, "account", cred.AccountID, "kind", kind, "version", version, "remote", remote.String())
 }
 
@@ -256,6 +259,7 @@ func (s *Server) onClose(sess *session.Session, err error) {
 	if st == nil {
 		return
 	}
+	metrics.CustomerBinds.Dec()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -289,6 +293,7 @@ func (s *Server) submit(sess *session.Session, req *pdu.PDU) {
 		return
 	}
 	if !st.limiter.Allow() {
+		metrics.Refused.WithLabelValues("smpp", "throttled").Inc()
 		_ = sess.Respond(req, pdu.StatusThrottled, nil)
 		return
 	}
@@ -465,6 +470,7 @@ func (s *Server) deliver(ctx context.Context, accountID string, batch []msgstore
 	}
 	wg.Wait()
 	if len(acks) > 0 {
+		metrics.CustomerReceipts.WithLabelValues("smpp").Add(float64(len(acks)))
 		actx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := s.store.AckReceipts(actx, accountID, acks...); err != nil {

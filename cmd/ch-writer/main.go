@@ -34,11 +34,20 @@ func main() {
 		ch := &records.ClickHouse{URL: cc.URL, Database: cc.Database, User: cc.User, Password: cc.Password}
 		d.Health.Add("clickhouse", func(ctx context.Context) error { return ch.Exec(ctx, "SELECT 1", nil) })
 		if cc.EnsureSchema {
-			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			err := ch.EnsureSchema(sctx, migrations.ClickHouse, "clickhouse")
-			cancel()
-			if err != nil {
-				return fmt.Errorf("clickhouse schema: %w", err)
+			// ClickHouse may start after us: keep trying instead of exiting.
+			for backoff := time.Second; ; backoff = min(backoff*2, 30*time.Second) {
+				sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err := ch.EnsureSchema(sctx, migrations.ClickHouse, "clickhouse")
+				cancel()
+				if err == nil {
+					break
+				}
+				d.Log.Warn("clickhouse schema not applied yet; retrying", "err", err, "retry_in", backoff)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
 			}
 		}
 		w := &records.Writer{CH: ch}

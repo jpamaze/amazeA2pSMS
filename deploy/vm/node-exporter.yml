@@ -1,0 +1,11 @@
+# Host metrics (CPU, memory, disk, network) on EVERY VM:
+#   docker compose -f node-exporter.yml up -d
+name: amaze-node
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    command: ["--path.rootfs=/host", "--web.listen-address=:9100"]
+    volumes: ["/:/host:ro,rslave"]

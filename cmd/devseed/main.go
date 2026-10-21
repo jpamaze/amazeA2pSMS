@@ -51,8 +51,8 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 	if err := config.Load(&cfg); err != nil {
 		return err
 	}
-	if cfg.Env != "dev" {
-		return errors.New("refusing to seed: APP_ENV is not dev")
+	if cfg.Env != "dev" && cfg.Env != "staging" {
+		return errors.New("refusing to seed: APP_ENV must be dev or staging")
 	}
 	key := os.Getenv("SECRETS_KEY")
 	if key == "" {

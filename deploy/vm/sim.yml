@@ -1,0 +1,25 @@
+# Vendor simulators and the load generator on SIM_1:
+#   docker compose -f sim.yml --env-file .env up -d smpp-sim http-sim
+# Load test (see scripts/signoff.sh):
+#   docker compose -f sim.yml --env-file .env run --rm loadgen -tps 5000 -duration 30m ...
+name: amaze-sim
+services:
+  smpp-sim:
+    image: ${REGISTRY}/smpp-sim:${TAG}
+    build: { context: ../.., args: { SERVICE: smpp-sim } }
+    network_mode: host
+    restart: unless-stopped
+    command: ["-addr", ":2776", "-dlr-delay", "500ms", "-fail", "0.02"]
+    ulimits: { nofile: { soft: 262144, hard: 262144 } }
+  http-sim:
+    image: ${REGISTRY}/http-sim:${TAG}
+    build: { context: ../.., args: { SERVICE: http-sim } }
+    network_mode: host
+    restart: unless-stopped
+    command: ["-addr", ":2777", "-dlr-url", "http://${APP_1}:8090/dlr/httpsim?token=devtoken", "-dlr-delay", "500ms"]
+  loadgen:
+    image: ${REGISTRY}/smpp-load:${TAG}
+    build: { context: ../.., args: { SERVICE: smpp-load } }
+    network_mode: host
+    profiles: [load]
+    volumes: ["./reports:/reports"]

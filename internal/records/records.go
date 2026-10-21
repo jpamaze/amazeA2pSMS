@@ -95,13 +95,9 @@ func FromState(st msgstore.State) Row {
 	return r
 }
 
-// Publish queues a final-state snapshot.
-func Publish(ctx context.Context, cl *kgo.Client, st msgstore.State) error {
-	rec, err := kafka.Record(Topic, st.ID, FromState(st))
-	if err != nil {
-		return err
-	}
-	return kafka.ProduceJSON(ctx, cl, rec)
+// NewRecord builds the Kafka record for a final-state snapshot.
+func NewRecord(st msgstore.State) (*kgo.Record, error) {
+	return kafka.Record(Topic, st.ID, FromState(st))
 }
 
 // ClickHouse is a minimal client for the HTTP interface.
@@ -115,9 +111,29 @@ type ClickHouse struct {
 
 // Exec runs one statement, with data appended in the body when given.
 func (c *ClickHouse) Exec(ctx context.Context, query string, data []byte) error {
+	_, err := c.do(ctx, query, data)
+	return err
+}
+
+// Query runs a SELECT and returns TabSeparated rows split into fields.
+func (c *ClickHouse) Query(ctx context.Context, query string) ([][]string, error) {
+	b, err := c.do(ctx, query+" FORMAT TabSeparated", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out [][]string
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if line != "" {
+			out = append(out, strings.Split(line, "\t"))
+		}
+	}
+	return out, nil
+}
+
+func (c *ClickHouse) do(ctx context.Context, query string, data []byte) ([]byte, error) {
 	u, err := url.Parse(c.URL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	q := u.Query()
 	q.Set("query", query)
@@ -128,7 +144,7 @@ func (c *ClickHouse) Exec(ctx context.Context, query string, data []byte) error 
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(data))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if c.User != "" {
 		req.SetBasicAuth(c.User, c.Password)
@@ -139,14 +155,20 @@ func (c *ClickHouse) Exec(ctx context.Context, query string, data []byte) error 
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("clickhouse: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if resp.StatusCode != http.StatusOK {
+		if len(b) > 2048 {
+			b = b[:2048]
+		}
+		return nil, fmt.Errorf("clickhouse: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return b, nil
 }
 
 // EnsureSchema applies every *.sql file in fsys/dir (all are idempotent).

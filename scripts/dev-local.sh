@@ -23,18 +23,37 @@ export POSTGRES_URL=${POSTGRES_URL:-postgres://sms:sms@localhost:5432/sms?sslmod
 export REDIS_ADDRS=${REDIS_ADDRS:-localhost:6379}
 export KAFKA_BROKERS=${KAFKA_BROKERS:-localhost:9092}
 
+P=$ROOT/.dev/pids
+
+# Processes are tracked by PID file, so stopping never matches unrelated
+# command lines (pattern-based pkill can hit the calling shell).
 stop() {
-  pkill -f "$B/" 2>/dev/null || true
-  pkill -f "scripts/ch-dev-server.py" 2>/dev/null || true
-  for _ in $(seq 1 40); do pgrep -f "$B/" >/dev/null || return 0; sleep 0.25; done
+  mkdir -p "$P"
+  local f pid
+  for f in "$P"/*.pid; do
+    [ -e "$f" ] || continue
+    pid=$(cat "$f")
+    kill "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 40); do
+    local alive=0
+    for f in "$P"/*.pid; do
+      [ -e "$f" ] || continue
+      kill -0 "$(cat "$f")" 2>/dev/null && alive=1
+    done
+    [ "$alive" = 0 ] && { rm -f "$P"/*.pid; return 0; }
+    sleep 0.25
+  done
   echo "some processes did not stop:" >&2
-  pgrep -af "$B/" >&2
+  for f in "$P"/*.pid; do kill -0 "$(cat "$f")" 2>/dev/null && echo "  $(basename "$f" .pid)" >&2; done
   return 1
 }
 
 start() {
   local name=$1; shift
+  mkdir -p "$P"
   nohup env "$@" >"$L/$name.log" 2>&1 &
+  echo $! >"$P/$name.pid"
 }
 
 case "${1:-up}" in
@@ -53,6 +72,7 @@ up)
   if [ -n "${CHDB_PYTHON:-}" ]; then
     rm -rf "$ROOT/.dev/chdb"
     start ch-dev-server "$CHDB_PYTHON" -I "$ROOT/scripts/ch-dev-server.py" --port 8123 --path "$ROOT/.dev/chdb"
+    for _ in $(seq 1 60); do curl -sf localhost:8123/ping >/dev/null && break; sleep 0.5; done
   fi
   sleep 1
   "$B/devseed" -route "${ROUTE:-sim}" ${SEED_ARGS:-} | tee "$L/seed.log"

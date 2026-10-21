@@ -1,0 +1,25 @@
+# One Redpanda (Kafka API) broker per VM. Run on KAFKA_1..3 with BROKER=1..3:
+#   BROKER=1 SELF=$KAFKA_1 docker compose -f kafka.yml --env-file .env up -d
+name: amaze-kafka
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - redpanda start
+      - --node-id ${BROKER}
+      - --smp ${REDPANDA_SMP}
+      - --memory ${REDPANDA_MEMORY}
+      - --overprovisioned=false
+      - --kafka-addr 0.0.0.0:9092
+      - --advertise-kafka-addr ${SELF}:9092
+      - --rpc-addr 0.0.0.0:33145
+      - --advertise-rpc-addr ${SELF}:33145
+      - --seeds ${KAFKA_1}:33145,${KAFKA_2}:33145,${KAFKA_3}:33145
+      - --set redpanda.default_topic_replications=3
+      - --set redpanda.auto_create_topics_enabled=false
+    volumes: [redpanda:/var/lib/redpanda/data]
+    ulimits: { nofile: { soft: 262144, hard: 262144 } }
+volumes:
+  redpanda:

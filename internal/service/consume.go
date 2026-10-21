@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
@@ -63,6 +65,7 @@ func ConsumeBatch(ctx context.Context, d *Deps, group string, topics []string, m
 		}
 		recs := fetches.Records()
 		if len(recs) > 0 {
+			start := time.Now()
 			if err := h(ctx, recs); err != nil {
 				cl.AllowRebalance()
 				if ctx.Err() != nil {
@@ -70,8 +73,12 @@ func ConsumeBatch(ctx context.Context, d *Deps, group string, topics []string, m
 				}
 				return fmt.Errorf("handler: %w", err)
 			}
+			metrics.BatchSeconds.WithLabelValues(group).Observe(time.Since(start).Seconds())
+			metrics.BatchRecords.WithLabelValues(group).Observe(float64(len(recs)))
 			if err := cl.CommitRecords(ctx, recs...); err != nil && ctx.Err() == nil {
 				d.Log.Warn("commit failed", "err", err)
+			} else {
+				metrics.ConsumedRecords.WithLabelValues(group).Add(float64(len(recs)))
 			}
 		}
 		cl.AllowRebalance()

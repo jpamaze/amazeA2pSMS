@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -131,6 +132,12 @@ func opsServer(addr string, h *health.Registry) *http.Server {
 	mux.Handle("GET /healthz", health.LiveHandler())
 	mux.Handle("GET /readyz", h.ReadyHandler())
 	mux.Handle("GET /metrics", metrics.Handler())
+	if os.Getenv("PPROF") == "true" {
+		// Profiling for load tests; keep the ops port off public networks.
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 }
 

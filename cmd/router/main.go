@@ -10,6 +10,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
@@ -37,6 +39,7 @@ func main() {
 				}
 				dec, err := table.Choose(m.AccountID, m.MCC, m.MNC)
 				if errors.Is(err, routing.ErrNoRoute) {
+					metrics.Routed.WithLabelValues("none").Inc()
 					r, err := kafka.Record(kafka.TopicStatus, m.ID, domain.StatusEvent{
 						MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price,
 						Status: domain.StatusRejected, ErrorCode: "NO_ROUTE", At: time.Now().UTC(),
@@ -48,6 +51,7 @@ func main() {
 					continue
 				}
 				m.Route = &domain.Route{VendorID: dec.VendorID, Cost: dec.Cost}
+				metrics.Routed.WithLabelValues(dec.VendorID).Inc()
 				r, err := kafka.Record(kafka.RouteTopic(dec.VendorID), m.ID, m)
 				if err != nil {
 					return err

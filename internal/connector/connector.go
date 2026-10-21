@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -57,15 +59,33 @@ type Connector struct {
 // status event per message. It returns only when every message has a final
 // outcome for this hop (submitted or failed), so offsets can be committed.
 func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
-	sem := make(chan struct{}, c.Transport.Window())
-	events := make([]*domain.StatusEvent, len(recs))
-	var wg sync.WaitGroup
+	msgs := make([]*domain.Message, len(recs))
+	ids := make([]string, 0, len(recs))
 	for i, rec := range recs {
 		var m domain.Message
 		if err := json.Unmarshal(rec.Value, &m); err != nil {
 			c.Log.Error("bad route record; skipping", "offset", rec.Offset, "err", err)
 			continue
 		}
+		msgs[i] = &m
+		ids = append(ids, m.ID)
+	}
+	// One round trip for the whole batch: which were already sent (replay)?
+	sentBy := map[string]string{}
+	if vendors, err := c.Store.SentBy(ctx, ids); err == nil {
+		for i, v := range vendors {
+			sentBy[ids[i]] = v
+		}
+	}
+
+	sem := make(chan struct{}, c.Transport.Window())
+	events := make([]*domain.StatusEvent, len(recs))
+	var wg sync.WaitGroup
+	for i, mp := range msgs {
+		if mp == nil {
+			continue
+		}
+		m := *mp
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -75,7 +95,7 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 		go func(i int, m domain.Message) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			events[i] = c.send(ctx, &m)
+			events[i] = c.send(ctx, &m, sentBy[m.ID])
 		}(i, m)
 	}
 	wg.Wait()
@@ -97,17 +117,19 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 	return kafka.ProduceJSON(ctx, c.Kafka, out...)
 }
 
-func (c *Connector) send(ctx context.Context, m *domain.Message) *domain.StatusEvent {
+func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) *domain.StatusEvent {
 	ev := &domain.StatusEvent{
 		MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, VendorID: c.VendorID,
 	}
 	// A replayed record (connector restarted after sending but before its
 	// offset was committed) is not sent twice.
-	if st, err := c.Store.Get(ctx, m.ID); err == nil && st.VendorID == c.VendorID && st.Parts > 0 {
+	if sentTo == c.VendorID {
 		ev.Status, ev.At = domain.StatusSubmitted, time.Now().UTC()
 		return ev
 	}
+	start := time.Now()
 	vmids, err := c.Transport.Send(ctx, m)
+	metrics.VendorSubmitSeconds.WithLabelValues(c.VendorID).Observe(time.Since(start).Seconds())
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -130,6 +152,7 @@ func (c *Connector) send(ctx context.Context, m *domain.Message) *domain.StatusE
 	if ev.Status == "" {
 		ev.Status, ev.At = domain.StatusSubmitted, time.Now().UTC()
 	}
+	metrics.VendorSubmits.WithLabelValues(c.VendorID, string(ev.Status)).Inc()
 	return ev
 }
 
@@ -289,6 +312,7 @@ func (c *Connector) Deliver(ctx context.Context, sm *pdu.SM) uint32 {
 			c.Log.Warn("unparseable receipt acknowledged and dropped", "err", perr)
 			return pdu.StatusOK
 		}
+		metrics.VendorDLRs.WithLabelValues(c.VendorID, r.Stat).Inc()
 		rec, err = kafka.Record(kafka.TopicDLR, c.VendorID+":"+r.ID, domain.DLR{
 			VendorID: c.VendorID, VendorMsgID: r.ID, Stat: r.Stat, ErrorCode: r.Err,
 			DoneAt: r.DoneDate, ReceivedAt: time.Now().UTC(),
@@ -316,6 +340,7 @@ func (c *Connector) Deliver(ctx context.Context, sm *pdu.SM) uint32 {
 // vendor only when it returns nil.
 func (c *Connector) JournalDLR(ctx context.Context, d domain.DLR) error {
 	d.VendorID = c.VendorID
+	metrics.VendorDLRs.WithLabelValues(c.VendorID, d.Stat).Inc()
 	rec, err := kafka.Record(kafka.TopicDLR, c.VendorID+":"+d.VendorMsgID, d)
 	if err != nil {
 		return err

@@ -77,7 +77,7 @@ func main() {
 		}
 		var pool []*connector.Bind
 		for _, bc := range binds {
-			b := connector.NewBind(bc, c.Deliver, d.Log)
+			b := connector.NewBind(cc.VendorID, bc, c.Deliver, d.Log)
 			pool = append(pool, b)
 			go b.Run(ctx)
 		}

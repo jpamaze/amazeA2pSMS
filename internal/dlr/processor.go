@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
@@ -31,18 +33,45 @@ type Processor struct {
 	Workers int
 }
 
+// outbox collects Kafka records produced while handling one batch, and the
+// messages to mark as notified once those records are acknowledged. One
+// produce per batch instead of one per message.
+type outbox struct {
+	mu    sync.Mutex
+	recs  []*kgo.Record
+	marks []string
+}
+
+func (o *outbox) add(mark string, recs ...*kgo.Record) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.recs = append(o.recs, recs...)
+	if mark != "" {
+		o.marks = append(o.marks, mark)
+	}
+}
+
+// flush produces the records, then marks receipts sent (at-least-once).
+func (p *Processor) flush(ctx context.Context, o *outbox) error {
+	if err := kafka.ProduceJSON(ctx, p.Kafka, o.recs...); err != nil {
+		return err
+	}
+	return p.Store.MarkReceiptSent(ctx, o.marks...)
+}
+
 // Process handles a batch with a worker pool. State transitions are
-// monotonic and receipts are claimed once, so order across records does not matter.
+// monotonic and receipts are marked once, so order across records does not matter.
 func (p *Processor) Process(ctx context.Context, recs []*kgo.Record) error {
 	workers := p.Workers
 	if workers <= 0 {
-		workers = 32
+		workers = 64
 	}
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		firstErr error
 		requeue  []*kgo.Record
+		ob       outbox
 	)
 	jobs := make(chan *kgo.Record)
 	for range workers {
@@ -50,7 +79,7 @@ func (p *Processor) Process(ctx context.Context, recs []*kgo.Record) error {
 		go func() {
 			defer wg.Done()
 			for rec := range jobs {
-				again, err := p.handle(ctx, rec)
+				again, err := p.handle(ctx, rec, &ob)
 				mu.Lock()
 				if err != nil && firstErr == nil {
 					firstErr = err
@@ -72,13 +101,13 @@ func (p *Processor) Process(ctx context.Context, recs []*kgo.Record) error {
 	}
 	if len(requeue) > 0 {
 		time.Sleep(100 * time.Millisecond) // give in-flight mappings a moment
-		return kafka.ProduceJSON(ctx, p.Kafka, requeue...)
+		ob.add("", requeue...)
 	}
-	return nil
+	return p.flush(ctx, &ob)
 }
 
 // handle returns a record to re-queue (unmatched DLR) or an infrastructure error.
-func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (*kgo.Record, error) {
+func (p *Processor) handle(ctx context.Context, rec *kgo.Record, ob *outbox) (*kgo.Record, error) {
 	switch rec.Topic {
 	case kafka.TopicStatus:
 		var ev domain.StatusEvent
@@ -86,20 +115,23 @@ func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (*kgo.Record, e
 			p.Log.Error("bad status record; skipping", "offset", rec.Offset, "err", err)
 			return nil, nil
 		}
-		return nil, p.status(ctx, ev)
+		return nil, p.status(ctx, ev, ob)
 	case kafka.TopicDLR:
 		var d domain.DLR
 		if err := json.Unmarshal(rec.Value, &d); err != nil {
 			p.Log.Error("bad dlr record; skipping", "offset", rec.Offset, "err", err)
 			return nil, nil
 		}
-		return p.receipt(ctx, rec, d)
+		return p.receipt(ctx, rec, d, ob)
 	}
 	return nil, nil
 }
 
-func (p *Processor) status(ctx context.Context, ev domain.StatusEvent) error {
-	_, err := p.Store.Apply(ctx, ev.MessageID, ev.Status, ev.ErrorCode, ev.At)
+func (p *Processor) status(ctx context.Context, ev domain.StatusEvent, ob *outbox) error {
+	changed, err := p.Store.Apply(ctx, ev.MessageID, ev.Status, ev.ErrorCode, ev.At)
+	if changed && ev.Status.Final() {
+		metrics.Final.WithLabelValues(string(ev.Status)).Inc()
+	}
 	if errors.Is(err, msgstore.ErrNotFound) {
 		return nil // expired record; nothing to update
 	}
@@ -108,12 +140,12 @@ func (p *Processor) status(ctx context.Context, ev domain.StatusEvent) error {
 	}
 	if ev.Status.Final() {
 		// Also on replay (Apply unchanged): notify checks whether the receipt went out.
-		return p.notify(ctx, ev.MessageID)
+		return p.notify(ctx, ev.MessageID, ob)
 	}
 	return nil
 }
 
-func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR) (*kgo.Record, error) {
+func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR, ob *outbox) (*kgo.Record, error) {
 	msgID, err := p.Store.Lookup(ctx, d.VendorID, d.VendorMsgID)
 	if errors.Is(err, msgstore.ErrNotFound) {
 		if time.Since(d.ReceivedAt) > MatchWindow {
@@ -151,10 +183,14 @@ func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR) 
 	// Receipt dates have minute resolution; the time we received the final
 	// receipt is the accurate completion time.
 	at := d.ReceivedAt
-	if _, err := p.Store.Apply(ctx, msgID, final, code, at); err != nil {
+	changed, err := p.Store.Apply(ctx, msgID, final, code, at)
+	if err != nil {
 		return nil, ignoreNotFound(err)
 	}
-	return nil, p.notify(ctx, msgID)
+	if changed {
+		metrics.Final.WithLabelValues(string(final)).Inc()
+	}
+	return nil, p.notify(ctx, msgID, ob)
 }
 
 // Reconcile expires messages that have waited longer than timeout for a
@@ -180,8 +216,12 @@ func (p *Processor) Reconcile(ctx context.Context, timeout, every time.Duration)
 				break
 			}
 			failures := 0
+			var ob outbox
 			for _, id := range ids {
-				_, err := p.Store.Apply(ctx, id, domain.StatusExpired, "NO_DLR", time.Now().UTC())
+				changed, err := p.Store.Apply(ctx, id, domain.StatusExpired, "NO_DLR", time.Now().UTC())
+				if changed {
+					metrics.Final.WithLabelValues(string(domain.StatusExpired)).Inc()
+				}
 				switch {
 				case errors.Is(err, msgstore.ErrNotFound):
 					_ = p.Store.UntrackInflight(ctx, id) // record gone
@@ -190,10 +230,14 @@ func (p *Processor) Reconcile(ctx context.Context, timeout, every time.Duration)
 					p.Log.Warn("reconcile apply", "message", id, "err", err)
 				default:
 					_ = p.Store.UntrackInflight(ctx, id) // already final: drop from the index
-					if err := p.notify(ctx, id); err != nil {
+					if err := p.notify(ctx, id, &ob); err != nil {
 						p.Log.Warn("reconcile notify", "message", id, "err", err)
 					}
 				}
+			}
+			if err := p.flush(ctx, &ob); err != nil {
+				p.Log.Warn("reconcile flush", "err", err)
+				break
 			}
 			p.Log.Info("expired messages without DLR", "count", len(ids))
 			if failures > 0 {
@@ -205,8 +249,9 @@ func (p *Processor) Reconcile(ctx context.Context, timeout, every time.Duration)
 
 // notify queues the customer's final receipt from the stored state: a
 // deliver_sm for SMPP customers who asked for receipts, a webhook event for
-// HTTP customers. It is marked sent only after queuing (at-least-once).
-func (p *Processor) notify(ctx context.Context, msgID string) error {
+// HTTP customers, plus the ClickHouse row. Kafka records go into the batch
+// outbox; the message is marked notified only after they are produced.
+func (p *Processor) notify(ctx context.Context, msgID string, ob *outbox) error {
 	s, err := p.Store.Get(ctx, msgID)
 	if err != nil {
 		return ignoreNotFound(err)
@@ -214,19 +259,22 @@ func (p *Processor) notify(ctx context.Context, msgID string) error {
 	if !s.Status.Final() || s.ReceiptSent {
 		return nil
 	}
-	// History row for ClickHouse, published with the receipt (same at-least-once guarantee).
-	if err := records.Publish(ctx, p.Kafka, s); err != nil {
+	// History row for ClickHouse, produced with the batch (same at-least-once guarantee).
+	hist, err := records.NewRecord(s)
+	if err != nil {
 		return err
 	}
 	switch s.Channel {
 	case domain.ChannelSMPP:
-		if !s.RegisteredDelivery {
-			return nil
+		if s.RegisteredDelivery {
+			if err := p.Store.EnqueueReceipt(ctx, s.AccountID, msgstore.Receipt{
+				MessageID: msgID, Stat: receiptStat(s.Status), Err: numericErr(s.ErrorCode),
+				Sender: s.Sender, Dest: s.Destination, Submitted: s.AcceptedAt, Done: s.DoneAt,
+			}); err != nil {
+				return err
+			}
 		}
-		err = p.Store.EnqueueReceipt(ctx, s.AccountID, msgstore.Receipt{
-			MessageID: msgID, Stat: receiptStat(s.Status), Err: numericErr(s.ErrorCode),
-			Sender: s.Sender, Dest: s.Destination, Submitted: s.AcceptedAt, Done: s.DoneAt,
-		})
+		ob.add(msgID, hist)
 	case domain.ChannelHTTP:
 		ev := webhook.Event{
 			ID: msgID, AccountID: s.AccountID, Status: string(s.Status), ErrorCode: s.ErrorCode,
@@ -236,12 +284,15 @@ func (p *Processor) notify(ctx context.Context, msgID string) error {
 		if !s.DoneAt.IsZero() {
 			ev.CompletedAt = s.DoneAt.Format(time.RFC3339Nano)
 		}
-		err = webhook.Publish(ctx, p.Kafka, ev)
+		wh, err := webhook.NewRecord(ev)
+		if err != nil {
+			return err
+		}
+		ob.add(msgID, hist, wh)
+	default:
+		ob.add(msgID, hist)
 	}
-	if err != nil {
-		return err
-	}
-	return p.Store.MarkReceiptSent(ctx, msgID)
+	return nil
 }
 
 func receiptStat(st domain.MessageStatus) string {

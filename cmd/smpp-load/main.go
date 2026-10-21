@@ -1,15 +1,18 @@
 // Command smpp-load binds to the platform as a customer, sends messages at a
-// fixed rate and reports throughput, latency and delivery receipts.
+// fixed rate and reports throughput, latency and delivery receipts. With
+// thresholds set it is the pass/fail gate of the load-test sign-off.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,17 +23,39 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/session"
 )
 
+type report struct {
+	Started         time.Time          `json:"started"`
+	TargetTPS       int                `json:"target_tps"`
+	DurationSeconds float64            `json:"duration_seconds"`
+	Accepted        int64              `json:"accepted"`
+	Failed          int64              `json:"failed"`
+	FailedByStatus  map[string]int     `json:"failed_by_status,omitempty"`
+	AcceptedTPS     float64            `json:"accepted_tps"`
+	LatencyMs       map[string]float64 `json:"submit_resp_latency_ms"`
+	Receipts        int64              `json:"receipts"`
+	Delivered       int64              `json:"delivered"`
+	ReceiptLagSec   float64            `json:"receipt_lag_seconds"` // after sending stopped
+	Pass            bool               `json:"pass"`
+	Failures        []string           `json:"failures,omitempty"`
+}
+
 func main() {
-	addr := flag.String("addr", "localhost:2775", "platform SMPP address")
+	addrs := flag.String("addr", "localhost:2775", "platform SMPP address(es), comma-separated; binds are spread over them")
 	user := flag.String("user", "demo", "system_id")
 	pass := flag.String("pass", "demo123", "password")
-	binds := flag.Int("binds", 4, "transceiver binds")
+	binds := flag.Int("binds", 4, "transceiver binds (total)")
 	window := flag.Int("window", 100, "outstanding submits per bind")
 	tps := flag.Int("tps", 1000, "target submits per second (total)")
 	dur := flag.Duration("duration", 30*time.Second, "how long to send")
 	drain := flag.Duration("drain", 30*time.Second, "how long to wait for receipts after sending")
 	sender := flag.String("sender", "AMZTST", "sender ID")
 	text := flag.String("text", "Your OTP is 482913. Do not share it with anyone. -Amaze", "message text")
+	progress := flag.Duration("progress", 0, "print a progress line at this interval (0 = off)")
+	reportPath := flag.String("report", "", "write a JSON report to this file")
+	minRatio := flag.Float64("min-tps-ratio", 0, "fail if accepted TPS < ratio x target (e.g. 0.98)")
+	maxP99 := flag.Duration("max-p99", 0, "fail if submit_sm_resp p99 exceeds this")
+	maxFail := flag.Int64("max-failed", -1, "fail if more submits than this are refused (-1 = no limit)")
+	maxLag := flag.Duration("max-receipt-lag", 0, "fail if the last receipt arrives later than this after sending stops")
 	flag.Parse()
 
 	var (
@@ -41,9 +66,11 @@ func main() {
 		lats                          []time.Duration
 		sent                          sync.Map // message ID -> struct{}
 		early                         sync.Map // receipts that beat their submit_sm_resp
+		lastReceipt                   atomic.Int64
 	)
 	countReceipt := func(stat string) {
 		receipts.Add(1)
+		lastReceipt.Store(time.Now().UnixNano())
 		if stat == "DELIVRD" {
 			delivered.Add(1)
 		}
@@ -67,9 +94,11 @@ func main() {
 		_ = s.Respond(req, pdu.StatusInvCmdID, nil)
 	}
 
+	targets := strings.Split(*addrs, ",")
 	var sessions []*session.Session
 	for i := range *binds {
-		conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
+		addr := strings.TrimSpace(targets[i%len(targets)])
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dial:", err)
 			os.Exit(1)
@@ -80,17 +109,38 @@ func main() {
 		_, err = s.Send(ctx, pdu.BindTransceiver, &pdu.Bind{SystemID: *user, Password: *pass, InterfaceVersion: pdu.V34})
 		cancel()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "bind %d: %v\n", i, err)
+			fmt.Fprintf(os.Stderr, "bind %d (%s): %v\n", i, addr, err)
 			os.Exit(1)
 		}
 		sessions = append(sessions, s)
 	}
-	fmt.Printf("bound %d sessions; sending %d TPS for %s\n", len(sessions), *tps, *dur)
+	fmt.Printf("bound %d sessions over %d address(es); sending %d TPS for %s\n", len(sessions), len(targets), *tps, *dur)
 
 	lim := rate.NewLimiter(rate.Limit(*tps), max(1, *tps/50))
 	ctx, cancel := context.WithTimeout(context.Background(), *dur)
 	defer cancel()
 	start := time.Now()
+
+	if *progress > 0 {
+		go func() {
+			tick := time.NewTicker(*progress)
+			defer tick.Stop()
+			var lastOK, lastRc int64
+			for {
+				select {
+				case <-tick.C:
+				case <-time.After(*dur + *drain + time.Minute):
+					return
+				}
+				o, r := ok.Load(), receipts.Load()
+				fmt.Printf("[%5.0fs] accepted %d (%.0f/s) failed %d receipts %d (%.0f/s) outstanding %d\n",
+					time.Since(start).Seconds(), o, float64(o-lastOK)/progress.Seconds(), fail.Load(),
+					r, float64(r-lastRc)/progress.Seconds(), o-r)
+				lastOK, lastRc = o, r
+			}
+		}()
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, *binds**window)
 	var n uint64
@@ -142,11 +192,18 @@ func main() {
 		}()
 	}
 	wg.Wait()
-	elapsed := time.Since(start)
+	sendEnd := time.Now()
+	elapsed := sendEnd.Sub(start)
 
+	rep := report{
+		Started: start.UTC(), TargetTPS: *tps, DurationSeconds: elapsed.Seconds(),
+		Accepted: ok.Load(), Failed: fail.Load(), AcceptedTPS: float64(ok.Load()) / elapsed.Seconds(),
+		LatencyMs: map[string]float64{},
+	}
 	fmt.Printf("\nsubmits: %d ok, %d failed in %s -> %.0f accepted TPS\n",
-		ok.Load(), fail.Load(), elapsed.Round(time.Millisecond), float64(ok.Load())/elapsed.Seconds())
+		rep.Accepted, rep.Failed, elapsed.Round(time.Millisecond), rep.AcceptedTPS)
 	if len(statuses) > 0 {
+		rep.FailedByStatus = map[string]int{}
 		keys := make([]uint32, 0, len(statuses))
 		for k := range statuses {
 			keys = append(keys, k)
@@ -154,26 +211,70 @@ func main() {
 		slices.Sort(keys)
 		for _, k := range keys {
 			fmt.Printf("  status 0x%08X: %d\n", k, statuses[k])
+			rep.FailedByStatus[fmt.Sprintf("0x%08X", k)] = statuses[k]
 		}
 	}
+	var p99 time.Duration
 	if len(lats) > 0 {
 		sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
 		pct := func(p float64) time.Duration { return lats[int(float64(len(lats)-1)*p)] }
+		p99 = pct(0.99)
+		for _, q := range []struct {
+			k string
+			p float64
+		}{{"p50", .50}, {"p95", .95}, {"p99", .99}, {"p999", .999}} {
+			rep.LatencyMs[q.k] = float64(pct(q.p).Microseconds()) / 1000
+		}
+		rep.LatencyMs["max"] = float64(lats[len(lats)-1].Microseconds()) / 1000
 		fmt.Printf("submit_sm_resp latency: p50 %s  p95 %s  p99 %s  max %s\n",
 			pct(0.50).Round(time.Microsecond*100), pct(0.95).Round(time.Microsecond*100),
-			pct(0.99).Round(time.Microsecond*100), lats[len(lats)-1].Round(time.Microsecond*100))
+			p99.Round(time.Microsecond*100), lats[len(lats)-1].Round(time.Microsecond*100))
 	}
 
 	deadline := time.Now().Add(*drain)
 	for time.Now().Before(deadline) && receipts.Load() < ok.Load() {
 		time.Sleep(200 * time.Millisecond)
 	}
-	fmt.Printf("receipts: %d of %d (%d DELIVRD) after %s\n",
-		receipts.Load(), ok.Load(), delivered.Load(), time.Since(start).Round(time.Millisecond))
+	rep.Receipts, rep.Delivered = receipts.Load(), delivered.Load()
+	if last := lastReceipt.Load(); last > 0 {
+		rep.ReceiptLagSec = max(0, time.Unix(0, last).Sub(sendEnd).Seconds())
+	}
+	fmt.Printf("receipts: %d of %d (%d DELIVRD); last receipt %.1fs after sending stopped\n",
+		rep.Receipts, rep.Accepted, rep.Delivered, rep.ReceiptLagSec)
 	for _, s := range sessions {
 		s.Unbind(context.Background())
 	}
-	if receipts.Load() < ok.Load() || fail.Load() > 0 {
-		os.Exit(2)
+
+	// Gate.
+	if rep.Receipts < rep.Accepted {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("%d receipts missing after %s drain", rep.Accepted-rep.Receipts, *drain))
 	}
+	if *minRatio > 0 && rep.AcceptedTPS < *minRatio*float64(*tps) {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("accepted %.0f TPS < %.0f%% of %d", rep.AcceptedTPS, *minRatio*100, *tps))
+	}
+	if *maxP99 > 0 && p99 > *maxP99 {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("p99 %s > %s", p99.Round(time.Millisecond), *maxP99))
+	}
+	if *maxFail >= 0 && rep.Failed > *maxFail {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("%d submits refused > %d allowed", rep.Failed, *maxFail))
+	}
+	if *maxLag > 0 && rep.ReceiptLagSec > maxLag.Seconds() {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("receipt lag %.1fs > %s", rep.ReceiptLagSec, *maxLag))
+	}
+	rep.Pass = len(rep.Failures) == 0
+	if *reportPath != "" {
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		if err := os.WriteFile(*reportPath, b, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "report:", err)
+		}
+	}
+	if rep.Pass {
+		fmt.Println("RESULT: PASS")
+		return
+	}
+	fmt.Println("RESULT: FAIL")
+	for _, f := range rep.Failures {
+		fmt.Println("  -", f)
+	}
+	os.Exit(2)
 }

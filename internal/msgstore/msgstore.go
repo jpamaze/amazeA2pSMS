@@ -214,8 +214,41 @@ func (s *Store) RecordPart(ctx context.Context, id, vmid string, delivered bool)
 
 // MarkReceiptSent records that the final receipt was queued. It is set after
 // queuing, so a crash in between can repeat a receipt but never lose one.
-func (s *Store) MarkReceiptSent(ctx context.Context, id string) error {
-	return s.rdb.HSet(ctx, msgKey(id), "dlr_sent", 1).Err()
+func (s *Store) MarkReceiptSent(ctx context.Context, ids ...string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, id := range ids {
+			p.HSet(ctx, msgKey(id), "dlr_sent", 1)
+		}
+		return nil
+	})
+	return err
+}
+
+// SentBy returns, for each message ID, the vendor it was already submitted
+// to ("" if none), in one round trip. The connector uses it to skip
+// re-sending replayed records.
+func (s *Store) SentBy(ctx context.Context, ids []string) ([]string, error) {
+	cmds := make([]*redis.SliceCmd, len(ids))
+	_, err := s.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for i, id := range ids {
+			cmds[i] = p.HMGet(ctx, msgKey(id), "vendor", "parts")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(ids))
+	for i, c := range cmds {
+		v := c.Val()
+		if len(v) == 2 && v[0] != nil && v[1] != nil && v[1] != "0" {
+			out[i], _ = v[0].(string)
+		}
+	}
+	return out, nil
 }
 
 func boolInt(b bool) int {

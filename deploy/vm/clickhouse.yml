@@ -1,0 +1,17 @@
+# ClickHouse on CH_1:
+#   docker compose -f clickhouse.yml --env-file .env up -d
+name: amaze-clickhouse
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: sms
+      CLICKHOUSE_USER: sms
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes: [chdata:/var/lib/clickhouse]
+    ulimits: { nofile: { soft: 262144, hard: 262144 } }
+volumes:
+  chdata:

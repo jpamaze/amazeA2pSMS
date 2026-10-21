@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
@@ -72,6 +74,36 @@ type Pipeline struct {
 
 // Accept validates, prices, holds and enqueues one message.
 func (p *Pipeline) Accept(ctx context.Context, req Request) (Result, error) {
+	start := time.Now()
+	res, err := p.accept(ctx, req)
+	ch := string(req.Channel)
+	if err != nil {
+		metrics.Refused.WithLabelValues(ch, Reason(err)).Inc()
+		return res, err
+	}
+	metrics.Accepted.WithLabelValues(ch).Inc()
+	metrics.AcceptSeconds.WithLabelValues(ch).Observe(time.Since(start).Seconds())
+	return res, nil
+}
+
+// Reason is a short metrics label for an acceptance error.
+func Reason(err error) string {
+	switch {
+	case errors.Is(err, ErrInvalidDestination):
+		return "invalid_destination"
+	case errors.Is(err, ErrInvalidSender):
+		return "invalid_sender"
+	case errors.Is(err, ErrEmptyMessage), errors.Is(err, ErrTooLong):
+		return "invalid_text"
+	case errors.Is(err, ErrNoPrice):
+		return "no_rate"
+	case errors.Is(err, ErrInsufficient):
+		return "insufficient_balance"
+	}
+	return "unavailable"
+}
+
+func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 	timeout := p.Timeout
 	if timeout == 0 {
 		timeout = 3 * time.Second

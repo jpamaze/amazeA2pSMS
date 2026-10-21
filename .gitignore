@@ -5,3 +5,7 @@
 .idea/
 .vscode/
 /.dev/
+deploy/vm/.env
+deploy/vm/reports/*.json
+deploy/vm/reports/since.txt
+deploy/vm/monitoring/prometheus.yml

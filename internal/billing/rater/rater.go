@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -81,6 +83,7 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 	}
 
 	// 2. PostgreSQL: one ledger entry per account for records not yet booked.
+	metrics.Charged.Add(float64(len(charges)))
 	return pgx.BeginFunc(ctx, r.PG, func(tx pgx.Tx) error {
 		last := map[tp]int64{}
 		high := map[tp]int64{}

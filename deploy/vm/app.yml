@@ -1,0 +1,111 @@
+# Platform services. Run on APP_1 and APP_2 (NODE=app-1 / app-2):
+#   NODE=app-1 docker compose -f app.yml --env-file .env up -d
+# One-off initialisation from any app VM (migrations, Kafka topics, seed data):
+#   docker compose -f app.yml --env-file .env --profile init run --rm migrate
+#   docker compose -f app.yml --env-file .env --profile init run --rm topics
+#   docker compose -f app.yml --env-file .env --profile init run --rm seed
+# Images: `docker compose -f app.yml build` (needs the repo checked out two
+# levels up) or pull ${REGISTRY}/<service>:${TAG} from your registry.
+name: amaze-app
+
+x-svc: &svc
+  network_mode: host
+  restart: unless-stopped
+  ulimits: { nofile: { soft: 262144, hard: 262144 } }
+  environment: &env
+    APP_ENV: staging
+    LOG_LEVEL: info
+    NODE_ID: ${NODE:-app}
+    POSTGRES_URL: postgres://sms:${POSTGRES_PASSWORD}@${DATA_1}:5432/sms?sslmode=disable
+    REDIS_ADDRS: ${DATA_1}:6379
+    KAFKA_BROKERS: ${KAFKA_1}:9092,${KAFKA_2}:9092,${KAFKA_3}:9092
+    SECRETS_KEY: ${SECRETS_KEY}
+    CLICKHOUSE_URL: http://${CH_1}:8123
+    CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    PPROF: "true"
+
+x-build: &build
+  context: ../..
+
+services:
+  smpp-server:
+    <<: *svc
+    image: ${REGISTRY}/smpp-server:${TAG}
+    build: { <<: *build, args: { SERVICE: smpp-server } }
+    environment: { <<: *env, OPS_ADDR: ":9101" }
+  http-api:
+    <<: *svc
+    image: ${REGISTRY}/http-api:${TAG}
+    build: { <<: *build, args: { SERVICE: http-api } }
+    environment: { <<: *env, OPS_ADDR: ":9102" }
+  admin-api:
+    <<: *svc
+    image: ${REGISTRY}/admin-api:${TAG}
+    build: { <<: *build, args: { SERVICE: admin-api } }
+    environment: { <<: *env, OPS_ADDR: ":9103" }
+  router:
+    <<: *svc
+    image: ${REGISTRY}/router:${TAG}
+    build: { <<: *build, args: { SERVICE: router } }
+    environment: { <<: *env, OPS_ADDR: ":9104" }
+  rater:
+    <<: *svc
+    image: ${REGISTRY}/rater:${TAG}
+    build: { <<: *build, args: { SERVICE: rater } }
+    environment: { <<: *env, OPS_ADDR: ":9105" }
+  dlr-processor:
+    <<: *svc
+    image: ${REGISTRY}/dlr-processor:${TAG}
+    build: { <<: *build, args: { SERVICE: dlr-processor } }
+    environment: { <<: *env, OPS_ADDR: ":9106" }
+  connector-sim:
+    <<: *svc
+    image: ${REGISTRY}/connector:${TAG}
+    build: { <<: *build, args: { SERVICE: connector } }
+    environment: { <<: *env, OPS_ADDR: ":9107", VENDOR_ID: sim }
+  connector-httpsim:
+    <<: *svc
+    image: ${REGISTRY}/connector:${TAG}
+    environment: { <<: *env, OPS_ADDR: ":9108", VENDOR_ID: httpsim, DLR_ADDR: ":8090" }
+  webhook-dispatcher:
+    <<: *svc
+    image: ${REGISTRY}/webhook-dispatcher:${TAG}
+    build: { <<: *build, args: { SERVICE: webhook-dispatcher } }
+    environment: { <<: *env, OPS_ADDR: ":9109" }
+  ch-writer:
+    <<: *svc
+    image: ${REGISTRY}/ch-writer:${TAG}
+    build: { <<: *build, args: { SERVICE: ch-writer } }
+    environment: { <<: *env, OPS_ADDR: ":9110" }
+
+  # --- one-off initialisation (profile "init") ---
+  migrate:
+    <<: *svc
+    profiles: [init]
+    restart: "no"
+    image: ${REGISTRY}/migrate:${TAG}
+    build: { <<: *build, args: { SERVICE: migrate } }
+  topics:
+    profiles: [init]
+    network_mode: host
+    image: redpandadata/redpanda:v24.2.7
+    entrypoint: ["/bin/bash", "/topics.sh"]
+    environment:
+      BROKERS: ${KAFKA_1}:9092,${KAFKA_2}:9092,${KAFKA_3}:9092
+      REPLICAS: "3"
+      PARTITIONS: "24"
+      VENDORS: sim httpsim
+    volumes: ["../kafka-topics.sh:/topics.sh:ro"]
+  seed:
+    <<: *svc
+    profiles: [init]
+    restart: "no"
+    image: ${REGISTRY}/devseed:${TAG}
+    build: { <<: *build, args: { SERVICE: devseed } }
+    command: ["-sim-host", "${SIM_1}", "-sim-binds", "8", "-http-sim-url", "http://${SIM_1}:2777", "-balance", "10000000", "-tps", "20000"]
+  billing-check:
+    <<: *svc
+    profiles: [init]
+    restart: "no"
+    image: ${REGISTRY}/billing-check:${TAG}
+    build: { <<: *build, args: { SERVICE: billing-check } }

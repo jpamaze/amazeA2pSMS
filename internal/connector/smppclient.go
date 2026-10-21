@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"golang.org/x/time/rate"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/pdu"
@@ -52,6 +54,7 @@ type Bind struct {
 	log     *slog.Logger
 	deliver DeliverFunc
 	limiter *rate.Limiter
+	vendor  string
 
 	mu   sync.RWMutex
 	sess *session.Session
@@ -59,8 +62,8 @@ type Bind struct {
 	upCh chan struct{} // closed and replaced whenever the bind comes up
 }
 
-// NewBind returns a bind; call Run to connect.
-func NewBind(cfg BindConfig, deliver DeliverFunc, log *slog.Logger) *Bind {
+// NewBind returns a bind for vendor; call Run to connect.
+func NewBind(vendor string, cfg BindConfig, deliver DeliverFunc, log *slog.Logger) *Bind {
 	if cfg.Window <= 0 {
 		cfg.Window = 10
 	}
@@ -68,7 +71,7 @@ func NewBind(cfg BindConfig, deliver DeliverFunc, log *slog.Logger) *Bind {
 		cfg.TPS = 100
 	}
 	return &Bind{
-		cfg: cfg, deliver: deliver,
+		cfg: cfg, deliver: deliver, vendor: vendor,
 		log:     log.With("bind", cfg.ID, "host", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)),
 		limiter: rate.NewLimiter(rate.Limit(cfg.TPS), max(1, cfg.TPS/20)),
 		upCh:    make(chan struct{}),
@@ -100,6 +103,7 @@ func (b *Bind) Run(ctx context.Context) {
 		b.mu.Lock()
 		b.sess = sess
 		b.up.Store(true)
+		metrics.VendorBindsUp.WithLabelValues(b.vendor).Inc()
 		close(b.upCh)
 		b.upCh = make(chan struct{})
 		b.mu.Unlock()
@@ -114,6 +118,7 @@ func (b *Bind) Run(ctx context.Context) {
 		b.up.Store(false)
 		b.sess = nil
 		b.mu.Unlock()
+		metrics.VendorBindsUp.WithLabelValues(b.vendor).Dec()
 		if ctx.Err() == nil {
 			b.log.Warn("vendor bind lost", "err", sess.Err())
 		}

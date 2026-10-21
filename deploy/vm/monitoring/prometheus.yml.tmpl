@@ -1,0 +1,26 @@
+# Rendered to prometheus.yml by `scripts/signoff.sh render-monitoring`.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+scrape_configs:
+  - job_name: platform
+    static_configs:
+      - targets: [__APP_TARGETS__]
+    relabel_configs:
+      - { source_labels: [__address__], regex: '.*:9101', target_label: service, replacement: smpp-server }
+      - { source_labels: [__address__], regex: '.*:9102', target_label: service, replacement: http-api }
+      - { source_labels: [__address__], regex: '.*:9103', target_label: service, replacement: admin-api }
+      - { source_labels: [__address__], regex: '.*:9104', target_label: service, replacement: router }
+      - { source_labels: [__address__], regex: '.*:9105', target_label: service, replacement: rater }
+      - { source_labels: [__address__], regex: '.*:9106', target_label: service, replacement: dlr-processor }
+      - { source_labels: [__address__], regex: '.*:9107', target_label: service, replacement: connector-sim }
+      - { source_labels: [__address__], regex: '.*:9108', target_label: service, replacement: connector-httpsim }
+      - { source_labels: [__address__], regex: '.*:9109', target_label: service, replacement: webhook-dispatcher }
+      - { source_labels: [__address__], regex: '.*:9110', target_label: service, replacement: ch-writer }
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: [__KAFKA_TARGETS__]
+  - job_name: node
+    static_configs:
+      - targets: [__NODE_TARGETS__]

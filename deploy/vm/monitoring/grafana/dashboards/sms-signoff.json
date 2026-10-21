@@ -1,0 +1,410 @@
+{
+ "title": "SMS sign-off",
+ "uid": "sms-signoff",
+ "schemaVersion": 39,
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "refresh": "10s",
+ "panels": [
+  {
+   "type": "timeseries",
+   "title": "Accepted vs final (per second)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate(sms_accepted_total[1m]))",
+     "legendFormat": "accepted"
+    },
+    {
+     "refId": "B",
+     "expr": "sum(rate(sms_final_total[1m]))",
+     "legendFormat": "final"
+    },
+    {
+     "refId": "C",
+     "expr": "sum(rate(sms_customer_receipts_total[1m]))",
+     "legendFormat": "customer receipts"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "In flight (accepted - final)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(sms_accepted_total) - sum(sms_final_total)",
+     "legendFormat": "in flight"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Accept latency (submit_sm_resp / HTTP 202)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sms_accept_seconds_bucket[1m])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(sms_accept_seconds_bucket[1m])))",
+     "legendFormat": "p99"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Refused at the edge, by reason",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (reason) (rate(sms_refused_total[1m]))",
+     "legendFormat": "{{reason}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Vendor submits by vendor and result",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (vendor, result) (rate(sms_vendor_submits_total[1m]))",
+     "legendFormat": "{{vendor}} {{result}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Vendor submit latency p99",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.99, sum by (le, vendor) (rate(sms_vendor_submit_seconds_bucket[1m])))",
+     "legendFormat": "{{vendor}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Vendor DLRs by stat",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (stat) (rate(sms_vendor_dlrs_total[1m]))",
+     "legendFormat": "{{stat}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Final status by status",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (status) (rate(sms_final_total[1m]))",
+     "legendFormat": "{{status}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Consumer throughput by group",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (group) (rate(sms_consumed_records_total[1m]))",
+     "legendFormat": "{{group}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Consumer batch time p99 by group",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 32,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.99, sum by (le, group) (rate(sms_consumer_batch_seconds_bucket[1m])))",
+     "legendFormat": "{{group}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Host CPU busy",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 40,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))",
+     "legendFormat": "{{instance}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Service CPU (cores)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 40,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (service, instance) (rate(process_cpu_seconds_total{job=\"platform\"}[1m]))",
+     "legendFormat": "{{service}} {{instance}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Webhook attempts",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 48,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (result) (rate(sms_webhook_attempts_total[1m]))",
+     "legendFormat": "{{result}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Binds",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 48,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(sms_customer_binds)",
+     "legendFormat": "customer"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (vendor) (sms_vendor_binds_up)",
+     "legendFormat": "vendor {{vendor}}"
+    }
+   ]
+  }
+ ]
+}

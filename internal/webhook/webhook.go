@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,14 +81,10 @@ type envelope struct {
 	LastError string    `json:"last_error,omitempty"`
 }
 
-// Publish queues ev for delivery.
-func Publish(ctx context.Context, cl *kgo.Client, ev Event) error {
+// NewRecord builds the Kafka record that queues ev for delivery.
+func NewRecord(ev Event) (*kgo.Record, error) {
 	ev.Event = "message.status"
-	rec, err := kafka.Record(TopicEvents, ev.ID, envelope{Event: ev, AccountID: ev.AccountID})
-	if err != nil {
-		return err
-	}
-	return kafka.ProduceJSON(ctx, cl, rec)
+	return kafka.Record(TopicEvents, ev.ID, envelope{Event: ev, AccountID: ev.AccountID})
 }
 
 // Sign returns the X-Amaze-Signature header value: t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">.
@@ -272,6 +270,8 @@ func (d *Dispatcher) handle(ctx context.Context, rec *kgo.Record) (*kgo.Record, 
 
 	err = d.post(ctx, target, env.Event)
 	if err == nil {
+		metrics.Webhooks.WithLabelValues("ok").Inc()
+		metrics.CustomerReceipts.WithLabelValues("http").Inc()
 		return nil, nil
 	}
 	if ctx.Err() != nil {
@@ -280,8 +280,10 @@ func (d *Dispatcher) handle(ctx context.Context, rec *kgo.Record) (*kgo.Record, 
 	env.LastError = err.Error()
 	if env.Attempt >= len(RetryDelays) {
 		d.Log.Warn("webhook dropped after retries", "message", env.ID, "account", env.AccountID, "err", err)
+		metrics.Webhooks.WithLabelValues("dead").Inc()
 		return kafka.Record(TopicDead, env.ID, env)
 	}
+	metrics.Webhooks.WithLabelValues("retry").Inc()
 	tier := env.Attempt
 	env.Attempt++
 	env.NextAt = time.Now().Add(RetryDelays[tier])

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
+
 	"golang.org/x/time/rate"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
@@ -108,6 +110,7 @@ type sendResponse struct {
 
 func (a *API) send(w http.ResponseWriter, r *http.Request, acct string) {
 	if !a.limiter(acct).Allow() {
+		metrics.Refused.WithLabelValues("http", "throttled").Inc()
 		writeErr(w, http.StatusTooManyRequests, "throttled", "request rate above account limit")
 		return
 	}

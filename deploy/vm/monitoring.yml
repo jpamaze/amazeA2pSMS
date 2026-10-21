@@ -1,0 +1,25 @@
+# Prometheus + Grafana on MON_1. Render the Prometheus config first:
+#   ../../scripts/signoff.sh render-monitoring
+#   docker compose -f monitoring.yml --env-file .env up -d
+# Grafana: http://MON_1:3000 (admin / GRAFANA_ADMIN_PASSWORD), dashboard "SMS sign-off".
+name: amaze-monitoring
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    network_mode: host
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+  grafana:
+    image: grafana/grafana:11.2.0
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+volumes:
+  promdata:
