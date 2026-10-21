@@ -43,6 +43,7 @@ type Row struct {
 	Segments    int               `json:"segments"`
 	PEID        string            `json:"pe_id"`
 	TemplateID  string            `json:"template_id"`
+	DLTCategory string            `json:"dlt_category"`
 	VendorID    string            `json:"vendor_id"`
 	VendorMsgID string            `json:"vendor_msg_id"`
 	Status      string            `json:"status"`
@@ -75,7 +76,7 @@ func FromMessage(m *domain.Message) Row {
 	return Row{
 		MessageID: m.ID, AccountID: m.AccountID, Channel: string(m.Channel), ClientRef: m.ClientRef,
 		Sender: m.Sender, Destination: m.Destination, MCC: m.MCC, MNC: m.MNC, Segments: m.Segments,
-		PEID: m.DLT.PEID, TemplateID: m.DLT.TemplateID, Status: string(domain.StatusAccepted),
+		PEID: m.DLT.PEID, TemplateID: m.DLT.TemplateID, DLTCategory: m.DLT.Category, Status: string(domain.StatusAccepted),
 		Price: orZero(m.Price.String()), Cost: "0",
 		AcceptedAt: ts(m.AcceptedAt), UpdatedAt: ts(m.AcceptedAt),
 		Charges: chargeMap(m.Charges),
@@ -95,7 +96,7 @@ func FromState(st msgstore.State) Row {
 	r := Row{
 		MessageID: st.ID, AccountID: st.AccountID, Channel: string(st.Channel), ClientRef: st.ClientRef,
 		Sender: st.Sender, Destination: st.Destination, MCC: st.MCC, MNC: st.MNC, Segments: st.Segments,
-		PEID: st.PEID, TemplateID: st.TemplateID, VendorID: st.VendorID, VendorMsgID: st.VendorMsgID,
+		PEID: st.PEID, TemplateID: st.TemplateID, DLTCategory: st.DLTCategory, VendorID: st.VendorID, VendorMsgID: st.VendorMsgID,
 		Status: string(st.Status), ErrorCode: st.ErrorCode, Price: orZero(st.Price), Cost: orZero(st.Cost),
 		AcceptedAt: ts(st.AcceptedAt), UpdatedAt: ts(time.Now()), Charges: st.Charges,
 	}

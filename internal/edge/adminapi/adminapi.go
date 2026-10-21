@@ -68,6 +68,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /v1/rate-cards", a.authed(PermRead, a.listRateCards))
 	a.billingRoutes(mux)
 	a.commercialRoutes(mux)
+	a.dltRoutes(mux)
 	return mux
 }
 

@@ -18,6 +18,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
@@ -373,6 +374,9 @@ func statusFor(err error) uint32 {
 		return StatusResellerBilling
 	case errors.Is(err, ingest.ErrUnavailable):
 		return pdu.StatusMsgQFul // temporary: the customer should retry
+	}
+	if e, ok := dlt.AsError(err); ok {
+		return e.SMPPStatus()
 	}
 	return pdu.StatusSysErr
 }

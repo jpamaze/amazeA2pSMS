@@ -77,8 +77,9 @@ const (
 // DLTFields are the India DLT identifiers carried by every message.
 type DLTFields struct {
 	PEID       string `json:"pe_id,omitempty"`
-	TemplateID string `json:"template_id,omitempty"` // detected when the customer omits it (phase 3)
+	TemplateID string `json:"template_id,omitempty"` // detected when the customer omits it
 	TMChain    string `json:"tm_chain,omitempty"`
+	Category   string `json:"category,omitempty"` // of the matched template
 }
 
 // Charge is what one account pays for a message: the sender at its own

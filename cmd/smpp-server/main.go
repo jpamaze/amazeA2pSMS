@@ -16,6 +16,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/smppserver"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
@@ -30,6 +31,8 @@ type smppConfig struct {
 	TagPEID       string `env:"DLT_TLV_PE_ID" envDefault:"0x1400"`
 	TagTemplateID string `env:"DLT_TLV_TEMPLATE_ID" envDefault:"0x1401"`
 	TagTMChain    string `env:"DLT_TLV_TM_CHAIN" envDefault:"0x1402"`
+	// Refuse messages whose PE ID has no registered TM chain and that carry none.
+	RequireChain bool `env:"DLT_REQUIRE_TM_CHAIN" envDefault:"true"`
 }
 
 func main() {
@@ -57,6 +60,7 @@ func main() {
 		pipeline := &ingest.Pipeline{
 			Chain:   &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
 			Deals:   &deals.Book{PG: d.PG, Redis: d.Redis},
+			DLT:     &dlt.Checker{PG: d.PG, RequireChain: sc.RequireChain},
 			Pricer:  pricing.NewCached(d.PG, time.Minute),
 			Wallets: wallet.New(d.Redis),
 			Store:   store,

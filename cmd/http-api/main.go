@@ -16,6 +16,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/httpapi"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
@@ -25,6 +26,8 @@ import (
 type apiConfig struct {
 	Addr       string `env:"HTTP_ADDR" envDefault:":8080"`
 	AccountTPS int    `env:"HTTP_ACCOUNT_TPS" envDefault:"200"`
+	// Refuse messages whose PE ID has no registered TM chain and that carry none.
+	RequireChain bool `env:"DLT_REQUIRE_TM_CHAIN" envDefault:"true"`
 }
 
 func main() {
@@ -40,6 +43,7 @@ func main() {
 			Accept: &ingest.Pipeline{
 				Chain:  &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
 				Deals:  &deals.Book{PG: d.PG, Redis: d.Redis},
+				DLT:    &dlt.Checker{PG: d.PG, RequireChain: ac.RequireChain},
 				Pricer: pricing.NewCached(d.PG, time.Minute), Wallets: wallets,
 				Store: store, Redis: d.Redis, Kafka: d.Kafka,
 			},

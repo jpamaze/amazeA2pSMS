@@ -61,6 +61,7 @@ type State struct {
 	ReceiptSent        bool // the customer's final receipt or webhook was queued
 	MCC, MNC           string
 	PEID, TemplateID   string
+	DLTCategory        string
 	VendorMsgID        string            // first part's vendor ID
 	Cost               string            // vendor cost for the whole message
 	Charges            map[string]string // account ID -> amount, every paying account
@@ -88,7 +89,7 @@ func (s *Store) Create(ctx context.Context, m *domain.Message) error {
 			"src", m.Sender, "dst", m.Destination, "segs", m.Segments, "price", m.Price.String(),
 			"status", string(domain.StatusAccepted), "reg", reg,
 			"accepted", m.AcceptedAt.UnixMilli(),
-			"mcc", m.MCC, "mnc", m.MNC, "pe", m.DLT.PEID, "tpl", m.DLT.TemplateID,
+			"mcc", m.MCC, "mnc", m.MNC, "pe", m.DLT.PEID, "tpl", m.DLT.TemplateID, "cat", m.DLT.Category,
 			"chg", chargesJSON(m.Charges))
 		p.Expire(ctx, k, TTL)
 		return nil
@@ -125,7 +126,7 @@ func (s *Store) Get(ctx context.Context, id string) (State, error) {
 		Parts: atoi("parts"), PartsDone: atoi("parts_done"), PartsOK: atoi("parts_ok"),
 		RegisteredDelivery: v["reg"] == "1", AcceptedAt: ms("accepted"), DoneAt: ms("done"),
 		ReceiptSent: v["dlr_sent"] == "1",
-		MCC:         v["mcc"], MNC: v["mnc"], PEID: v["pe"], TemplateID: v["tpl"],
+		MCC:         v["mcc"], MNC: v["mnc"], PEID: v["pe"], TemplateID: v["tpl"], DLTCategory: v["cat"],
 		VendorMsgID: v["vmid"], Cost: v["cost"], Charges: parseCharges(v["chg"]),
 	}, nil
 }

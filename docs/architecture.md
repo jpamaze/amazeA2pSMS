@@ -23,12 +23,12 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 
 | Service | Reads | Writes | Stores |
 | --- | --- | --- | --- |
-| smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices) |
+| smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices, DLT registrations) |
 | http-api | REST | `sms.submit` | Redis, PG |
 | admin-api | REST | — | PG, Redis, ClickHouse (usage reports) |
 | router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, costs and vendor deals, refreshed from PG; Redis (vendor deal progress) |
 | connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
-| dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis |
+| dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis; PG (vendor error codes, reloaded every minute) |
 | rater | `sms.status` | — | Redis wallet and deal reservations, PG ledger + `rater_offsets` + deal usage |
 | webhook-dispatcher | `sms.webhooks`, `sms.webhooks.retry.1-4` | retry tiers, `sms.webhooks.dead` | PG (webhook URL, encrypted secret) |
 | ch-writer | `sms.submit`, `sms.records` | ClickHouse `message_records` | — |

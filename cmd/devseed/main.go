@@ -18,6 +18,7 @@ import (
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/config"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/pg"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/redisx"
@@ -45,6 +46,12 @@ var httpSimURL, routeTo string
 
 // DevDLRToken is the HTTP simulator's callback token in dev data.
 const DevDLRToken = "devtoken"
+
+// Dev DLT identities (smpp-load sends DevPEID and the OTP template ID).
+const (
+	DevPEID = "1101234567890123456"
+	DevTMID = "1702000000000000001"
+)
 
 func run(simHost string, simPort, simBinds int, balance, price string, tps int) error {
 	var cfg config.Common
@@ -121,6 +128,33 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 				VALUES ($1, 'topup', $2, $2, 'devseed opening balance', $3, 'devseed')`, customerID, balance, "devseed:"+customerID); err != nil {
 				return err
 			}
+		}
+
+		// DLT registrations matching smpp-load's default message, plus a test
+		// template for scripts: "Test message <anything up to 30 chars>".
+		if _, err := tx.Exec(ctx, `INSERT INTO telemarketers (tm_id, name, is_self) VALUES ($1, 'Amaze (dev)', true)
+			ON CONFLICT (tm_id) DO NOTHING`, DevTMID); err != nil {
+			return err
+		}
+		entityID, err := one(`INSERT INTO dlt_entities (account_id, pe_id, name) VALUES ($1, $2, 'Demo Customer')
+			ON CONFLICT (pe_id) DO UPDATE SET status = 'active' RETURNING id`, customerID, DevPEID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO dlt_tm_chains (entity_id, chain_value)
+			SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM dlt_tm_chains WHERE entity_id = $1)`, entityID, DevPEID+","+DevTMID); err != nil {
+			return err
+		}
+		if err := dlt.StoreHeaders(ctx, tx, entityID, []dlt.HeaderRow{{Header: "AMZTST", Category: dlt.Transactional, Status: "active"}}); err != nil {
+			return err
+		}
+		if err := dlt.StoreTemplates(ctx, tx, entityID, []dlt.TemplateRow{
+			{TemplateID: "1107160000000012345", Name: "OTP", Category: dlt.Transactional, Status: "active", Headers: []string{"AMZTST"},
+				Body: "Your OTP is {#var#}. Do not share it with anyone. -Amaze"},
+			{TemplateID: "1107160000000012346", Name: "Test", Category: dlt.Transactional, Status: "active", Headers: []string{"AMZTST"},
+				Body: "Test message {#var#}"},
+		}); err != nil {
+			return err
 		}
 
 		// Platform owner who signs in to the admin API through the dev Keycloak.
@@ -235,12 +269,13 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 	}
 
 	fmt.Printf(`Seeded.
+  DLT              : PE %s, header AMZTST, templates "Your OTP is {#var#}. Do not share it with anyone. -Amaze" and "Test message {#var#}"
   customer account : %s
   wallet balance   : %s INR (credit limit %s)
   SMPP             : system_id=demo password=demo123 (port 2775)
   HTTP API key     : %s
   vendor           : sim -> %s:%d (%d binds); httpsim -> %s (DLR token %q)
   demo routed to   : %s
-`, customerID, bal.StringFixed(2), limit.StringFixed(2), apiKey, simHost, simPort, simBinds, httpSimURL, DevDLRToken, routeTo)
+`, DevPEID, customerID, bal.StringFixed(2), limit.StringFixed(2), apiKey, simHost, simPort, simBinds, httpSimURL, DevDLRToken, routeTo)
 	return nil
 }

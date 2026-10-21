@@ -21,6 +21,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/numbering"
@@ -74,6 +75,7 @@ type Result struct {
 type Pipeline struct {
 	Chain   hierarchy.Chain // who pays; nil charges the sender only
 	Deals   *deals.Book     // customer deals; nil = rate cards only
+	DLT     *dlt.Checker    // India DLT; nil skips it
 	Pricer  pricing.Pricer
 	Wallets *wallet.Store
 	Store   *msgstore.Store
@@ -116,6 +118,9 @@ func Reason(err error) string {
 	case errors.Is(err, ErrInactive):
 		return "account_inactive"
 	}
+	if e, ok := dlt.AsError(err); ok {
+		return string(e.Reason)
+	}
 	return "unavailable"
 }
 
@@ -143,6 +148,17 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 	}
 	if segments > MaxSegments {
 		return Result{}, ErrTooLong
+	}
+	// DLT before anything is held or claimed: a refusal leaves nothing to undo.
+	if p.DLT != nil {
+		f, err := p.DLT.Check(ctx, req.AccountID, req.Sender, req.Text, len(req.UDH) > 0, req.DLT)
+		if err != nil {
+			if _, ok := dlt.AsError(err); ok {
+				return Result{}, err
+			}
+			return Result{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
+		req.DLT = f
 	}
 
 	id, err := uuid.NewV7()

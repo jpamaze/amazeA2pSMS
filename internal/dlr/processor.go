@@ -14,6 +14,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
@@ -31,6 +32,7 @@ type Processor struct {
 	Kafka   *kgo.Client
 	Log     *slog.Logger
 	Workers int
+	Errors  *dlt.ErrorMap // vendor error codes; nil passes them through
 }
 
 // outbox collects Kafka records produced while handling one batch, and the
@@ -178,6 +180,13 @@ func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR, 
 		code = d.Stat
 		if d.ErrorCode != "" {
 			code = d.Stat + ":" + d.ErrorCode
+		}
+		// A mapped code keeps the vendor's raw code for support and gives the
+		// customer ours: "UNDELIV:1703|dlt_template:603" -> err:603.
+		if p.Errors != nil {
+			if mp, ok := p.Errors.Lookup(d.VendorID, d.ErrorCode); ok {
+				code += "|" + mp.Reason + ":" + mp.CustomerCode
+			}
 		}
 	}
 	// Receipt dates have minute resolution; the time we received the final
