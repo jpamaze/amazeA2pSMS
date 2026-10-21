@@ -16,11 +16,15 @@ x-svc: &svc
     APP_ENV: staging
     LOG_LEVEL: info
     NODE_ID: ${NODE:-app}
-    POSTGRES_URL: postgres://sms:${POSTGRES_PASSWORD}@${DATA_1}:5432/sms?sslmode=disable
-    REDIS_ADDRS: ${DATA_1}:6379
+    # The single-node sign-off layout; the HA layout (deploy/ha/env.example)
+    # sets POSTGRES_URL, REDIS_* and CLICKHOUSE_URL to its clusters.
+    POSTGRES_URL: ${POSTGRES_URL:-postgres://sms:${POSTGRES_PASSWORD}@${DATA_1}:5432/sms?sslmode=disable}
+    REDIS_ADDRS: ${REDIS_ADDRS:-${DATA_1}:6379}
+    REDIS_SENTINEL_MASTER: ${REDIS_SENTINEL_MASTER:-}
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     KAFKA_BROKERS: ${KAFKA_1}:9092,${KAFKA_2}:9092,${KAFKA_3}:9092
     SECRETS_KEY: ${SECRETS_KEY}
-    CLICKHOUSE_URL: http://${CH_1}:8123
+    CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://${CH_1}:8123}
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     PPROF: "true"
 
@@ -144,3 +148,11 @@ services:
     restart: "no"
     image: ${REGISTRY}/billing-check:${TAG}
     build: { <<: *build, args: { SERVICE: billing-check } }
+  # After a Redis failover or restore (docs/phase5-ha.md):
+  #   docker compose -f app.yml --env-file .env --profile ops run --rm wallet-resync [-dry-run]
+  wallet-resync:
+    <<: *svc
+    profiles: [ops]
+    restart: "no"
+    image: ${REGISTRY}/wallet-resync:${TAG}
+    build: { <<: *build, args: { SERVICE: wallet-resync } }

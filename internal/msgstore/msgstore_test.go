@@ -105,3 +105,29 @@ func TestReceiptQueue(t *testing.T) {
 	}
 	s.rdb.Del(ctx, receiptStream(acct))
 }
+
+func TestEnsureRebuildsALostRecord(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	m := &domain.Message{ID: uuid.NewString(), AccountID: uuid.NewString(), Channel: domain.ChannelHTTP, Sender: "AMZTST",
+		Destination: "919812345678", Segments: 1, Price: decimal.RequireFromString("0.12"), AcceptedAt: time.Now()}
+	// Lost in a failover: Ensure recreates it from the message.
+	if created, err := s.Ensure(ctx, m); err != nil || !created {
+		t.Fatalf("ensure missing: %v %v", created, err)
+	}
+	st, err := s.Get(ctx, m.ID)
+	if err != nil || st.AccountID != m.AccountID || st.Status != domain.StatusAccepted || st.Price != "0.12" {
+		t.Fatalf("rebuilt: %+v %v", st, err)
+	}
+	// Present: left alone.
+	if _, err := s.Apply(ctx, m.ID, domain.StatusSubmitted, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := s.Ensure(ctx, m); err != nil || created {
+		t.Fatalf("ensure present: %v %v", created, err)
+	}
+	if st, _ := s.Get(ctx, m.ID); st.Status != domain.StatusSubmitted {
+		t.Fatalf("existing record overwritten: %+v", st)
+	}
+	_ = s.Delete(ctx, m.ID)
+}

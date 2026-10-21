@@ -14,17 +14,23 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
 )
 
 // Topic carries final-state snapshots from the DLR processor.
@@ -117,11 +123,17 @@ func NewRecord(st msgstore.State) (*kgo.Record, error) {
 
 // ClickHouse is a minimal client for the HTTP interface.
 type ClickHouse struct {
-	URL      string // e.g. http://localhost:8123
+	// URL is one server, e.g. http://localhost:8123, or several replicas
+	// separated by commas: a request that cannot reach a replica, or finds
+	// it read-only (lost its Keeper quorum), goes to the next, and the
+	// client stays with the one that answered.
+	URL      string
 	Database string
 	User     string
 	Password string
 	HTTP     *http.Client
+
+	preferred atomic.Int32
 }
 
 // Exec runs one statement, with data appended in the body when given.
@@ -146,9 +158,33 @@ func (c *ClickHouse) Query(ctx context.Context, query string) ([][]string, error
 }
 
 func (c *ClickHouse) do(ctx context.Context, query string, data []byte) ([]byte, error) {
-	u, err := url.Parse(c.URL)
+	urls := strings.Split(c.URL, ",")
+	first := int(c.preferred.Load()) % len(urls)
+	var err error
+	for i := range urls {
+		n := (first + i) % len(urls)
+		var b []byte
+		var retry bool
+		b, retry, err = c.doOne(ctx, strings.TrimSpace(urls[n]), query, data)
+		if err == nil {
+			c.preferred.Store(int32(n))
+			return b, nil
+		}
+		if !retry || ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+// replicaDown are ClickHouse errors after which another replica may succeed.
+var replicaDown = []string{"TABLE_IS_READ_ONLY", "NO_ZOOKEEPER", "KEEPER_EXCEPTION", "ALL_CONNECTION_TRIES_FAILED"}
+
+// doOne sends one request; retry reports whether another replica may do better.
+func (c *ClickHouse) doOne(ctx context.Context, base, query string, data []byte) ([]byte, bool, error) {
+	u, err := url.Parse(base)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	q := u.Query()
 	q.Set("query", query)
@@ -159,55 +195,82 @@ func (c *ClickHouse) do(ctx context.Context, query string, data []byte) ([]byte,
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if c.User != "" {
 		req.SetBasicAuth(c.User, c.Password)
 	}
 	client := c.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = defaultHTTP
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		if len(b) > 2048 {
 			b = b[:2048]
 		}
-		return nil, fmt.Errorf("clickhouse: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		msg := strings.TrimSpace(string(b))
+		retry := resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable
+		for _, code := range replicaDown {
+			retry = retry || strings.Contains(msg, code)
+		}
+		return nil, retry, fmt.Errorf("clickhouse %s: HTTP %d: %s", u.Host, resp.StatusCode, msg)
 	}
-	return b, nil
+	return b, false, nil
 }
 
+var defaultHTTP = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConnsPerHost: 16,
+	IdleConnTimeout:     90 * time.Second,
+}}
+
 // EnsureSchema applies every *.sql file in fsys/dir (all are idempotent).
+// In a Replicated database (the HA cluster, docs/phase5-ha.md) MergeTree
+// engines become their Replicated forms, so every replica holds the data;
+// DDL run on one replica reaches the others through the database.
 func (c *ClickHouse) EnsureSchema(ctx context.Context, fsys fs.FS, dir string) error {
 	names, err := fs.Glob(fsys, dir+"/*.sql")
 	if err != nil {
 		return err
 	}
 	sort.Strings(names)
+	rows, err := c.Query(ctx, "SELECT engine FROM system.databases WHERE name = currentDatabase()")
+	if err != nil {
+		return err
+	}
+	replicated := len(rows) == 1 && rows[0][0] == "Replicated"
 	for _, n := range names {
 		b, err := fs.ReadFile(fsys, n)
 		if err != nil {
 			return err
 		}
-		if err := c.Exec(ctx, string(b), nil); err != nil {
+		q := string(b)
+		if replicated {
+			q = replicatedEngine.ReplaceAllString(q, "ENGINE = Replicated${1}MergeTree(")
+		}
+		if err := c.Exec(ctx, q, nil); err != nil {
 			return fmt.Errorf("%s: %w", n, err)
 		}
 	}
 	return nil
 }
 
+// replicatedEngine matches a non-replicated MergeTree engine clause.
+var replicatedEngine = regexp.MustCompile(`ENGINE\s*=\s*((?:Replacing|Summing|Aggregating|Collapsing|VersionedCollapsing)?)MergeTree\(`)
+
 // Writer converts sms.submit and sms.records records to rows and inserts them.
 type Writer struct {
-	CH *ClickHouse
+	CH  *ClickHouse
+	Log *slog.Logger // nil: discarded
 }
 
 // Process inserts one batch. An insert failure returns an error so the batch
@@ -232,6 +295,16 @@ func (w *Writer) Process(ctx context.Context, recs []*kgo.Record) error {
 		default:
 			continue
 		}
+		// A row without valid IDs (a record rebuilt from partial state)
+		// would make ClickHouse refuse the whole batch, forever.
+		if !validUUID(row.MessageID) || !validUUID(row.AccountID) {
+			metrics.RecordsDropped.Inc()
+			if w.Log != nil {
+				w.Log.Warn("message record without valid IDs; not written", "topic", rec.Topic, "offset", rec.Offset,
+					"message", row.MessageID, "account", row.AccountID)
+			}
+			continue
+		}
 		if err := enc.Encode(row); err != nil {
 			return err
 		}
@@ -252,4 +325,9 @@ func (w *Writer) Process(ctx context.Context, recs []*kgo.Record) error {
 		}
 	}
 	return err
+}
+
+func validUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
 }

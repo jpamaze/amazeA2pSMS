@@ -75,7 +75,7 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 		return err
 	}
 	defer pool.Close()
-	rdb := redisx.New(cfg.RedisAddrs)
+	rdb := redisx.New(cfg.Redis())
 	defer rdb.Close()
 
 	var platformID, customerID, apiKey string

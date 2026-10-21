@@ -17,7 +17,7 @@ Single-box results are in `docs/phase1-core-messaging.md` (4,515–4,859 TPS on 
 
 All 10 VMs sit in one private network (one availability zone is fine for the sign-off) with these ports open between them: 9092 and 33145 (Kafka), 9644 (Redpanda metrics), 5432, 6379, 8123, 2775–2777, 8080, 8081, 8090, 9100–9110. Run `node-exporter.yml` on every VM.
 
-Data stores run as single instances here, because the sign-off measures throughput. Production adds a PostgreSQL replica with failover, Redis replicas with Sentinel or Redis Cluster, and a second ClickHouse replica.
+Data stores run as single instances here, because the sign-off measures throughput. The production layout replicates every store (PostgreSQL with Patroni, Redis with Sentinel, three ClickHouse replicas, three app VMs behind a load balancer): see [phase5-ha.md](phase5-ha.md) and `deploy/ha/`. The services take the same settings either way, so the sign-off can also run on the HA layout.
 
 ## Setup (about 1 hour)
 

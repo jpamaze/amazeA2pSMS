@@ -1,0 +1,46 @@
+# Redis HA on REDIS_1..REDIS_3: one Redis and one Sentinel per VM. REDIS_1
+# starts as primary; Sentinel moves the role on failure (quorum 2 of 3) and
+# the platform follows it (REDIS_SENTINEL_MASTER=amaze).
+#   SELF=$REDIS_1 docker compose -f redis.yml --env-file .env up -d
+# Writes need one replica in sync (min-replicas-to-write 1, at most 10 s
+# behind): a primary cut off from both replicas stops taking writes rather
+# than accept writes a failover would lose.
+name: amaze-redis
+services:
+  redis:
+    image: redis:7.2
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    # The config is written once; afterwards Sentinel rewrites it (REPLICAOF),
+    # so a restarted node comes back in its current role.
+    command:
+      - |
+        [ -f /data/redis.conf ] || {
+          printf '%s\n' "port 6379" "dir /data" "appendonly yes" "appendfsync everysec" \
+            "maxmemory ${REDIS_MAXMEMORY}" "maxmemory-policy noeviction" "io-threads 4" \
+            "min-replicas-to-write 1" "min-replicas-max-lag 10" \
+            "requirepass ${REDIS_PASSWORD}" "masterauth ${REDIS_PASSWORD}" \
+            "replica-announce-ip ${SELF}" > /data/redis.conf
+          [ "${SELF}" = "${REDIS_1}" ] || echo "replicaof ${REDIS_1} 6379" >> /data/redis.conf
+        }
+        exec redis-server /data/redis.conf
+    volumes: [redisdata:/data]
+  sentinel:
+    image: redis:7.2
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [redis]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        [ -f /data/sentinel.conf ] || printf '%s\n' "port 26379" "dir /data" \
+          "sentinel announce-ip ${SELF}" "sentinel resolve-hostnames no" \
+          "sentinel monitor amaze ${REDIS_1} 6379 2" "sentinel auth-pass amaze ${REDIS_PASSWORD}" \
+          "sentinel down-after-milliseconds amaze 5000" "sentinel failover-timeout amaze 60000" \
+          "sentinel parallel-syncs amaze 1" > /data/sentinel.conf
+        exec redis-server /data/sentinel.conf --sentinel
+    volumes: [sentinel:/data]
+volumes:
+  redisdata:
+  sentinel:

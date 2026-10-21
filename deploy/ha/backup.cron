@@ -1,0 +1,16 @@
+# Backup schedule (times in the VM's time zone). Install on the VMs named in
+# each block with `crontab -e` as a user that can run docker, changing
+# /opt/amaze to where the repository is checked out.
+
+# PostgreSQL VMs (all three; only the current leader backs up). WAL is
+# archived continuously, so any point in time since the oldest full backup
+# can be restored.
+15 1 * * 0    cd /opt/amaze/deploy/ha && docker compose -f postgres.yml --env-file .env exec -T patroni /etc/amaze/backup.sh full >>/var/log/amaze-backup.log 2>&1
+15 1 * * 1-6  cd /opt/amaze/deploy/ha && docker compose -f postgres.yml --env-file .env exec -T patroni /etc/amaze/backup.sh diff >>/var/log/amaze-backup.log 2>&1
+
+# CH_1 only.
+45 2 * * 0    cd /opt/amaze/deploy/ha && docker compose -f clickhouse.yml --env-file .env exec -T clickhouse backup.sh full >>/var/log/amaze-backup.log 2>&1
+45 2 * * 1-6  cd /opt/amaze/deploy/ha && docker compose -f clickhouse.yml --env-file .env exec -T clickhouse backup.sh incr >>/var/log/amaze-backup.log 2>&1
+
+# Redis VMs (all three; only a replica acts).
+5 * * * *     /opt/amaze/deploy/ha/redis-backup.sh >>/var/log/amaze-backup.log 2>&1

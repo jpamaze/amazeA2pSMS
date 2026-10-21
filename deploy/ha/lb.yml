@@ -1,0 +1,25 @@
+# Load balancers on LB_1 and LB_2 sharing the virtual IP LB_VIP (keepalived,
+# VRRP). On a public cloud use its network load balancer (TCP pass-through)
+# instead and skip this file.
+#   LB_PRIORITY=150 docker compose -f lb.yml --env-file .env up -d   # LB_1
+#   LB_PRIORITY=100 docker compose -f lb.yml --env-file .env up -d   # LB_2
+name: amaze-lb
+services:
+  haproxy:
+    image: haproxy:2.8
+    network_mode: host
+    restart: unless-stopped
+    environment: { APP_1: "${APP_1}", APP_2: "${APP_2}", APP_3: "${APP_3}", PG_1: "${PG_1}", PG_2: "${PG_2}", PG_3: "${PG_3}" }
+    volumes: ["./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    ulimits: { nofile: { soft: 262144, hard: 262144 } }
+  keepalived:
+    image: osixia/keepalived:2.0.20
+    network_mode: host
+    restart: unless-stopped
+    cap_add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
+    environment:
+      KEEPALIVED_INTERFACE: ${LB_INTERFACE:-eth0}
+      KEEPALIVED_VIRTUAL_IPS: ${LB_VIP}
+      KEEPALIVED_UNICAST_PEERS: "#PYTHON2BASH:['${LB_1}', '${LB_2}']"
+      KEEPALIVED_PRIORITY: ${LB_PRIORITY}
+      KEEPALIVED_PASSWORD: ${LB_VRRP_PASSWORD}

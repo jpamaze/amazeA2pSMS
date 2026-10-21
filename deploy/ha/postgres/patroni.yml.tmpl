@@ -1,0 +1,61 @@
+# Rendered by entrypoint.sh. One PostgreSQL per VM (PG_1..PG_3); etcd runs
+# next to each. synchronous_mode keeps one replica synchronous, so a commit
+# the primary confirmed survives a failover (RPO 0 for money).
+scope: amaze
+name: ${NODE_NAME}
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: ${SELF}:8008
+etcd3:
+  hosts: [${PG_1}:2379, ${PG_2}:2379, ${PG_3}:2379]
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"
+        archive_mode: "on"
+        archive_timeout: 60
+        max_connections: ${PG_MAX_CONNECTIONS}
+        shared_buffers: ${PG_SHARED_BUFFERS}
+        effective_cache_size: 20GB
+        wal_compression: "on"
+        checkpoint_timeout: 15min
+        max_wal_size: 8GB
+  initdb: [{encoding: UTF8}, data-checksums]
+  pg_hba:
+    - local all all trust
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+  post_bootstrap: /etc/amaze/backup.sh bootstrap
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${SELF}:5432
+  data_dir: /var/lib/postgresql/data/pgdata
+  bin_dir: /usr/lib/postgresql/16/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser: {username: postgres, password: "${POSTGRES_PASSWORD}"}
+    replication: {username: replicator, password: "${REPLICATION_PASSWORD}"}
+    rewind: {username: postgres, password: "${POSTGRES_PASSWORD}"}
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+    # WAL waits in pg_wal until the stanza exists (backup.sh init writes the
+    # marker on the shared backup volume).
+    archive_command: test -f /backup/pgbackrest/stanza.ok && pgbackrest --config=/etc/amaze/pgbackrest.conf --stanza=amaze archive-push "%p"
+    restore_command: pgbackrest --config=/etc/amaze/pgbackrest.conf --stanza=amaze archive-get %f "%p"
+  create_replica_methods: [pgbackrest, basebackup]
+  pgbackrest:
+    command: pgbackrest --config=/etc/amaze/pgbackrest.conf --stanza=amaze --delta restore
+    keep_data: true
+    no_params: true
+  basebackup: {checkpoint: fast}

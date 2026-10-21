@@ -99,4 +99,10 @@ var (
 	ConsumedRecords = f.NewCounterVec(prometheus.CounterOpts{
 		Name: "sms_consumed_records_total", Help: "Records processed and committed.",
 	}, []string{"group"})
+	RecordsDropped = f.NewCounter(prometheus.CounterOpts{
+		Name: "sms_records_dropped_total", Help: "Message history rows not written to ClickHouse because they lack valid IDs.",
+	})
+	BatchRetries = f.NewCounterVec(prometheus.CounterOpts{
+		Name: "sms_consumer_batch_retries_total", Help: "Failed batches retried in place (e.g. during a database failover).",
+	}, []string{"group"})
 )

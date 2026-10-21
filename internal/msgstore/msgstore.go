@@ -97,6 +97,18 @@ func (s *Store) Create(ctx context.Context, m *domain.Message) error {
 	return err
 }
 
+// Ensure recreates a message's record from the message itself when it is
+// missing: after a Redis failover the newest records may not have reached
+// the promoted replica, but the message travels whole through Kafka. It
+// reports whether the record was recreated.
+func (s *Store) Ensure(ctx context.Context, m *domain.Message) (bool, error) {
+	n, err := s.rdb.Exists(ctx, msgKey(m.ID)).Result()
+	if err != nil || n == 1 {
+		return false, err
+	}
+	return true, s.Create(ctx, m)
+}
+
 // Delete removes a record (used when acceptance is rolled back).
 func (s *Store) Delete(ctx context.Context, id string) error {
 	return s.rdb.Del(ctx, msgKey(id), dlrSetKey(id)).Err()
@@ -129,6 +141,15 @@ func (s *Store) Get(ctx context.Context, id string) (State, error) {
 		MCC:         v["mcc"], MNC: v["mnc"], PEID: v["pe"], TemplateID: v["tpl"], DLTCategory: v["cat"],
 		VendorMsgID: v["vmid"], Cost: v["cost"], Charges: parseCharges(v["chg"]),
 	}, nil
+}
+
+// Status returns a message's current status.
+func (s *Store) Status(ctx context.Context, id string) (domain.MessageStatus, error) {
+	st, err := s.rdb.HGet(ctx, msgKey(id), "status").Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrNotFound
+	}
+	return domain.MessageStatus(st), err
 }
 
 // MapVendorIDs records which vendor message IDs belong to a message, and how

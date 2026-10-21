@@ -84,7 +84,7 @@ func run(cfg config.Common, logger *slog.Logger, needs Needs, main MainFunc) err
 		d.Health.Add("postgres", pg.Ping(pool))
 	}
 	if needs.Redis {
-		rc := redisx.New(cfg.RedisAddrs)
+		rc := redisx.New(cfg.Redis())
 		defer rc.Close()
 		d.Redis = rc
 		d.Health.Add("redis", redisx.Ping(rc))

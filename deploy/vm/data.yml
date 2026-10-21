@@ -1,7 +1,7 @@
 # PostgreSQL and Redis on DATA_1:
 #   docker compose -f data.yml --env-file .env up -d
-# Production adds a PostgreSQL streaming replica and Redis replicas with
-# Sentinel (or Redis Cluster); the sign-off measures throughput on one of each.
+# Single instances for the throughput sign-off; production runs the
+# replicated layout in deploy/ha/ (docs/phase5-ha.md).
 name: amaze-data
 services:
   postgres:

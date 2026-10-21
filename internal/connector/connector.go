@@ -181,7 +181,7 @@ func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) 
 		if m.Route != nil {
 			cost = m.Route.Cost.Mul(decimal.NewFromInt(int64(m.Segments))).String()
 		}
-		if err := c.Store.MapVendorIDs(ctx, c.VendorID, m.ID, vmids, cost); err != nil {
+		if err := c.mapVendorIDs(ctx, m, vmids, cost); err != nil {
 			c.Log.Error("vendor ID mapping failed; DLRs for this message will be unmatched",
 				"message", m.ID, "err", err)
 		}
@@ -192,6 +192,36 @@ func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) 
 	}
 	metrics.VendorSubmits.WithLabelValues(c.VendorID, string(ev.Status)).Inc()
 	return ev, nil
+}
+
+// MapRetryFor is how long the connector keeps trying to record a sent
+// message's vendor IDs (it cannot unsend it): long enough to ride out a
+// Redis failover.
+var MapRetryFor = 20 * time.Second
+
+// mapVendorIDs records the vendor IDs, recreating the message's record
+// first if Redis lost it, and retries through a Redis failover.
+func (c *Connector) mapVendorIDs(ctx context.Context, m *domain.Message, vmids []string, cost string) error {
+	deadline := time.Now().Add(MapRetryFor)
+	wait := 100 * time.Millisecond
+	for {
+		created, err := c.Store.Ensure(ctx, m)
+		if created {
+			c.Log.Warn("message record was missing (Redis failover?); rebuilt from the routed message", "message", m.ID)
+		}
+		if err == nil {
+			err = c.Store.MapVendorIDs(ctx, c.VendorID, m.ID, vmids, cost)
+		}
+		if err == nil || ctx.Err() != nil || time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, 2*time.Second)
+	}
 }
 
 func (c *Connector) reroute(m *domain.Message, reason string) *domain.Message {

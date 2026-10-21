@@ -50,8 +50,14 @@ type tp struct {
 	partition int32
 }
 
-// Process handles one batch of sms.status records.
+// Process handles one batch of sms.status records, holding the wallet sync
+// lock shared so a resync never runs between its Redis settles and its
+// ledger transaction.
 func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
+	return wallet.Shared(ctx, r.PG, func(conn *pgxpool.Conn) error { return r.process(ctx, conn, recs) })
+}
+
+func (r *Rater) process(ctx context.Context, conn *pgxpool.Conn, recs []*kgo.Record) error {
 	// 1. Redis: settle or release every hold of every paying account (idempotent).
 	type charge struct {
 		rec   *kgo.Record
@@ -118,7 +124,7 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 
 	// 2. PostgreSQL: one ledger entry per account for records not yet booked.
 	metrics.Charged.Add(float64(len(charges)))
-	return pgx.BeginFunc(ctx, r.PG, func(tx pgx.Tx) error {
+	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		last := map[tp]int64{}
 		high := map[tp]int64{}
 		for _, rec := range recs {

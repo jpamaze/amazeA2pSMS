@@ -21,6 +21,12 @@ type Handler func(ctx context.Context, rec *kgo.Record) error
 // only after it returns nil.
 type BatchHandler func(ctx context.Context, recs []*kgo.Record) error
 
+// RetryFor is how long a failing batch is retried in place before the
+// consumer gives up and the service exits (to be restarted, and the batch
+// redelivered). It covers a PostgreSQL or Redis failover (about 30 s and
+// 10 s); handlers are idempotent, so a retry is the same as a redelivery.
+var RetryFor = 2 * time.Minute
+
 // Consume runs h on each record, one at a time.
 func Consume(ctx context.Context, d *Deps, group string, topics []string, h Handler) error {
 	return ConsumeBatch(ctx, d, group, topics, 0, func(ctx context.Context, recs []*kgo.Record) error {
@@ -66,7 +72,7 @@ func ConsumeBatch(ctx context.Context, d *Deps, group string, topics []string, m
 		recs := fetches.Records()
 		if len(recs) > 0 {
 			start := time.Now()
-			if err := h(ctx, recs); err != nil {
+			if err := retry(ctx, d, group, func() error { return h(ctx, recs) }); err != nil {
 				cl.AllowRebalance()
 				if ctx.Err() != nil {
 					return nil
@@ -82,5 +88,32 @@ func ConsumeBatch(ctx context.Context, d *Deps, group string, topics []string, m
 			}
 		}
 		cl.AllowRebalance()
+	}
+}
+
+// retry runs fn until it succeeds, ctx ends or RetryFor has passed, with
+// backoff from 250 ms to 5 s.
+func retry(ctx context.Context, d *Deps, group string, fn func() error) error {
+	deadline := time.Now().Add(RetryFor)
+	wait := 250 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil {
+			if attempt > 1 {
+				d.Log.Info("batch succeeded after retrying", "group", group, "attempts", attempt)
+			}
+			return nil
+		}
+		if ctx.Err() != nil || time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		metrics.BatchRetries.WithLabelValues(group).Inc()
+		d.Log.Warn("batch failed; retrying", "group", group, "attempt", attempt, "in", wait, "err", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, 5*time.Second)
 	}
 }

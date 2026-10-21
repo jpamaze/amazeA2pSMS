@@ -190,7 +190,10 @@ func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR, 
 	if errors.Is(err, msgstore.ErrNotFound) {
 		return nil, nil
 	}
-	if err != nil || !res.Counted || res.Parts == 0 || res.PartsDone < res.Parts {
+	// A receipt already counted goes on too: its batch may have failed after
+	// counting it (say, Redis failing over), before the final status or the
+	// customer's receipt. Apply and notify are idempotent.
+	if err != nil || res.Parts == 0 || res.PartsDone < res.Parts {
 		return nil, err
 	}
 

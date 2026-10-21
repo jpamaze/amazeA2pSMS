@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 
@@ -56,7 +57,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	rdb := redisx.New(cfg.RedisAddrs)
+	rdb := redisx.New(cfg.Redis())
 	ch := &records.ClickHouse{URL: *chURL, Database: *chDB, User: *chUser, Password: *chPass}
 
 	var failures []string
@@ -91,68 +92,21 @@ func main() {
 	check("no open balance holds", openHolds == 0, fmt.Sprintf("%d open", openHolds))
 	check("Redis balance = PostgreSQL balance", len(mismatches) == 0, strings.Join(first(mismatches, 5), "; "))
 
-	// 3: ledger charges vs ClickHouse, per account.
-	ledger := map[string]decimal.Decimal{}
-	rows, err := pool.Query(ctx, `SELECT account_id::text, -sum(amount) FROM ledger_entries
-		WHERE kind = 'charge' AND created_at >= $1 GROUP BY account_id`, from)
-	if err != nil {
-		fatal(err)
-	}
-	for rows.Next() {
-		var a string
-		var v decimal.Decimal
-		if err := rows.Scan(&a, &v); err != nil {
-			fatal(err)
+	// 3 + 4: ClickHouse catches up with the ledger and every message gets a
+	// final status (history is written behind the traffic; after a failover
+	// it may be a minute behind).
+	deadline = time.Now().Add(*settle)
+	var r historyResult
+	for {
+		r = history(ctx, pool, ch, from)
+		if (len(r.billDiff) == 0 && r.stuck == 0) || time.Now().After(deadline) {
+			break
 		}
-		ledger[a] = v
+		time.Sleep(5 * time.Second)
 	}
-	rows.Close()
-	ts := from.UTC().Format("2006-01-02 15:04:05")
-	// Every paying account (sender and resellers) per the charges map.
-	chRows, err := ch.Query(ctx, fmt.Sprintf(`SELECT acct, toString(sum(amount)), count()
-		FROM message_records FINAL
-		ARRAY JOIN mapKeys(charges) AS acct, mapValues(charges) AS amount
-		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND vendor_id != '' AND status IN ('submitted','delivered','failed','expired')
-		GROUP BY acct`, ts))
-	if err != nil {
-		fatal(err)
-	}
-	var billDiff []string
-	var charged int64
-	seen := map[string]bool{}
-	for _, r := range chRows {
-		want, _ := decimal.NewFromString(r[1])
-		var n int64
-		fmt.Sscan(r[2], &n)
-		charged += n
-		seen[r[0]] = true
-		if got := ledger[r[0]]; !got.Equal(want) {
-			billDiff = append(billDiff, fmt.Sprintf("%s ledger %s vs records %s", r[0], got.StringFixed(4), want.StringFixed(4)))
-		}
-	}
-	for a, v := range ledger {
-		if !seen[a] && !v.IsZero() {
-			billDiff = append(billDiff, fmt.Sprintf("%s ledger %s vs records 0", a, v.StringFixed(4)))
-		}
-	}
-	check("ledger charges = ClickHouse charges, per account", len(billDiff) == 0,
-		fmt.Sprintf("%d charged messages; %s", charged, strings.Join(first(billDiff, 5), "; ")))
-
-	// 4: nothing stuck.
-	stuck, err := ch.Query(ctx, fmt.Sprintf(`SELECT status, count() FROM message_records FINAL
-		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND status IN ('accepted','submitted') GROUP BY status`, ts))
-	if err != nil {
-		fatal(err)
-	}
-	var stuckN int64
-	var parts []string
-	for _, r := range stuck {
-		var n int64
-		fmt.Sscan(r[1], &n)
-		stuckN += n
-		parts = append(parts, r[0]+"="+r[1])
-	}
-	check("every message has a final status", stuckN == 0, strings.Join(parts, " "))
+	check("ledger charges = ClickHouse charges, per account", len(r.billDiff) == 0,
+		fmt.Sprintf("%d charged messages; %s", r.charged, strings.Join(first(r.billDiff, 5), "; ")))
+	check("every message has a final status", r.stuck == 0, strings.Join(r.parts, " "))
 
 	if len(failures) > 0 {
 		fmt.Println("RESULT: FAIL")
@@ -225,4 +179,76 @@ func envOr(k, def string) string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "billing-check:", err)
 	os.Exit(1)
+}
+
+type historyResult struct {
+	billDiff []string
+	charged  int64
+	stuck    int64
+	parts    []string
+}
+
+// history compares, per account, ledger charges since from with the
+// charged messages ClickHouse shows, and counts messages not yet final.
+func history(ctx context.Context, pool *pgxpool.Pool, ch *records.ClickHouse, from time.Time) historyResult {
+	ledger := map[string]decimal.Decimal{}
+	rows, err := pool.Query(ctx, `SELECT account_id::text, -sum(amount) FROM ledger_entries
+		WHERE kind = 'charge' AND created_at >= $1 GROUP BY account_id`, from)
+	if err != nil {
+		fatal(err)
+	}
+	for rows.Next() {
+		var a string
+		var v decimal.Decimal
+		if err := rows.Scan(&a, &v); err != nil {
+			fatal(err)
+		}
+		ledger[a] = v
+	}
+	rows.Close()
+	ts := from.UTC().Format("2006-01-02 15:04:05")
+	// Every paying account (sender and resellers) per the charges map.
+	chRows, err := ch.Query(ctx, fmt.Sprintf(`SELECT acct, toString(sum(amount)), count()
+		FROM message_records FINAL
+		ARRAY JOIN mapKeys(charges) AS acct, mapValues(charges) AS amount
+		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND vendor_id != '' AND status IN ('submitted','delivered','failed','expired')
+		GROUP BY acct`, ts))
+	if err != nil {
+		fatal(err)
+	}
+	var billDiff []string
+	var charged int64
+	seen := map[string]bool{}
+	for _, r := range chRows {
+		want, _ := decimal.NewFromString(r[1])
+		var n int64
+		fmt.Sscan(r[2], &n)
+		charged += n
+		seen[r[0]] = true
+		if got := ledger[r[0]]; !got.Equal(want) {
+			billDiff = append(billDiff, fmt.Sprintf("%s ledger %s vs records %s", r[0], got.StringFixed(4), want.StringFixed(4)))
+		}
+	}
+	for a, v := range ledger {
+		if !seen[a] && !v.IsZero() {
+			billDiff = append(billDiff, fmt.Sprintf("%s ledger %s vs records 0", a, v.StringFixed(4)))
+		}
+	}
+
+	// Nothing stuck.
+	stuck, err := ch.Query(ctx, fmt.Sprintf(`SELECT status, count() FROM message_records FINAL
+		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND status IN ('accepted','submitted') GROUP BY status`, ts))
+	if err != nil {
+		fatal(err)
+	}
+	var stuckN int64
+	var parts []string
+	for _, r := range stuck {
+		var n int64
+		fmt.Sscan(r[1], &n)
+		stuckN += n
+		parts = append(parts, r[0]+"="+r[1])
+	}
+	return historyResult{billDiff: billDiff, charged: charged, stuck: stuckN, parts: parts}
+
 }

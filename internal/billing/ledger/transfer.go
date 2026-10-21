@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
@@ -42,7 +43,15 @@ func (s *Service) Refund(ctx context.Context, t Transfer) (decimal.Decimal, erro
 	return s.move(ctx, t, "refund_given", "refund", "refund:")
 }
 
-func (s *Service) move(ctx context.Context, t Transfer, outKind, inKind, keyPrefix string) (decimal.Decimal, error) {
+func (s *Service) move(ctx context.Context, t Transfer, outKind, inKind, keyPrefix string) (bal decimal.Decimal, err error) {
+	err = wallet.Shared(ctx, s.PG, func(conn *pgxpool.Conn) error {
+		bal, err = s.moveLocked(ctx, conn, t, outKind, inKind, keyPrefix)
+		return err
+	})
+	return bal, err
+}
+
+func (s *Service) moveLocked(ctx context.Context, conn *pgxpool.Conn, t Transfer, outKind, inKind, keyPrefix string) (decimal.Decimal, error) {
 	if !t.Amount.IsPositive() {
 		return decimal.Zero, fmt.Errorf("ledger: transfer amount must be positive")
 	}
@@ -50,7 +59,7 @@ func (s *Service) move(ctx context.Context, t Transfer, outKind, inKind, keyPref
 		return decimal.Zero, fmt.Errorf("ledger: distinct accounts, idempotency key and actor are required")
 	}
 	var fromBal, fromLimit decimal.Decimal
-	if err := s.PG.QueryRow(ctx, `SELECT balance, credit_limit FROM wallets WHERE account_id = $1`, t.From).Scan(&fromBal, &fromLimit); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT balance, credit_limit FROM wallets WHERE account_id = $1`, t.From).Scan(&fromBal, &fromLimit); err != nil {
 		return decimal.Zero, fmt.Errorf("ledger: source wallet: %w", err)
 	}
 	amt := wallet.FromDecimal(t.Amount)
@@ -64,7 +73,7 @@ func (s *Service) move(ctx context.Context, t Transfer, outKind, inKind, keyPref
 	}
 
 	var toBal, toLimit decimal.Decimal
-	err := pgx.BeginFunc(ctx, s.PG, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		var outBal decimal.Decimal
 		if err := tx.QueryRow(ctx, `UPDATE wallets SET balance = balance - $2, updated_at = now()
 			WHERE account_id = $1 RETURNING balance`, t.From, t.Amount).Scan(&outBal); err != nil {

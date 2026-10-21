@@ -1,0 +1,35 @@
+# Rendered by entrypoint.sh. Two repositories, each a complete copy:
+#   repo1  S3-compatible object storage (off-site)
+#   repo2  /backup, an NFS share (or any mounted disk) on another machine
+# Both are encrypted; keep BACKUP_CIPHER_PASS outside the platform too, a
+# backup cannot be restored without it.
+[global]
+repo1-type=s3
+repo1-path=/pgbackrest
+repo1-s3-bucket=${S3_BUCKET}
+repo1-s3-endpoint=${S3_ENDPOINT}
+repo1-storage-port=${S3_PORT}
+repo1-s3-region=${S3_REGION}
+repo1-s3-key=${S3_ACCESS_KEY}
+repo1-s3-key-secret=${S3_SECRET_KEY}
+repo1-s3-uri-style=${S3_URI_STYLE}
+repo1-storage-verify-tls=${S3_VERIFY_TLS}
+repo1-retention-full=${BACKUP_RETENTION_FULL_S3}
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass=${BACKUP_CIPHER_PASS}
+repo2-type=posix
+repo2-path=/backup/pgbackrest
+repo2-retention-full=${BACKUP_RETENTION_FULL_NFS}
+repo2-cipher-type=aes-256-cbc
+repo2-cipher-pass=${BACKUP_CIPHER_PASS}
+start-fast=y
+compress-type=zst
+process-max=4
+archive-async=y
+spool-path=/var/lib/pgbackrest
+log-path=/var/log/pgbackrest
+
+[amaze]
+pg1-path=/var/lib/postgresql/data/pgdata
+pg1-port=5432
+pg1-socket-path=/var/run/postgresql

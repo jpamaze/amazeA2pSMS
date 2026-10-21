@@ -10,6 +10,9 @@
 # Needs: Go, a PostgreSQL database `sms` owned by user sms/sms, Redis on 6379.
 # Optional: CHDB_PYTHON=<python with `pip install chdb`> runs a ClickHouse
 # stand-in on :8123 and the ch-writer; without it, ch-writer is skipped.
+# CLICKHOUSE_URL=<url[,url...]> uses a real ClickHouse instead (e.g. the HA
+# tier from scripts/ha-local.sh: `eval "$(scripts/ha-local.sh env)"` first,
+# which also points PostgreSQL and Redis at it).
 # ROUTE=httpsim sends the demo customer's traffic through the HTTP vendor.
 # WARNING: `up` wipes the `sms` database schema and FLUSHALLs Redis.
 set -euo pipefail
@@ -62,14 +65,20 @@ up)
   (cd "$ROOT" && go build -o "$B/" ./cmd/...)
   stop
   rm -f "$L"/*.log
-  redis-cli -u "redis://${REDIS_ADDRS%%,*}" FLUSHALL >/dev/null
+  redis_primary=${REDIS_ADDRS%%,*}
+  if [ -n "${REDIS_SENTINEL_MASTER:-}" ]; then
+    redis_primary=$(redis-cli -u "redis://$redis_primary" SENTINEL get-master-addr-by-name "$REDIS_SENTINEL_MASTER" | paste -sd:)
+  fi
+  REDISCLI_AUTH=${REDIS_PASSWORD:-} redis-cli -u "redis://$redis_primary" FLUSHALL >/dev/null
   psql "$POSTGRES_URL" -q -o /dev/null -c "SET client_min_messages=warning" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
   "$B/migrate" >"$L/migrate.log" 2>&1
   start devkafka "$B/devkafka" -port 9092 -partitions 12
   start smpp-sim "$B/smpp-sim" -addr :2776 -dlr-delay "${DLR_DELAY:-200ms}" -fail "${FAIL:-0.02}"
   start http-sim "$B/http-sim" -addr :2777 -dlr-url "http://127.0.0.1:8090/dlr/httpsim?token=devtoken" \
     -dlr-delay "${DLR_DELAY:-200ms}" -fail "${FAIL:-0.02}"
+  CH_URL=${CLICKHOUSE_URL:-}
   if [ -n "${CHDB_PYTHON:-}" ]; then
+    CH_URL=http://localhost:8123
     rm -rf "$ROOT/.dev/chdb"
     start ch-dev-server "$CHDB_PYTHON" -I "$ROOT/scripts/ch-dev-server.py" --port 8123 --path "$ROOT/.dev/chdb"
     for _ in $(seq 1 60); do curl -sf localhost:8123/ping >/dev/null && break; sleep 0.5; done
@@ -86,7 +95,7 @@ up)
       --web.listen-address=:9090 --log.level=warn
   fi
   [ -d "$ROOT/portal/out" ] || echo "portal not built (cd portal && npm ci && npm run build); admin-api serves the API only"
-  start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="${CHDB_PYTHON:+http://localhost:8123}" \
+  start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="$CH_URL" \
     PORTAL_DIR="$( [ -d "$ROOT/portal/out" ] && echo "$ROOT/portal/out")" PROMETHEUS_URL="${PROMETHEUS_BIN:+http://localhost:9090}" "$B/admin-api"
   start alerter       OPS_ADDR=:9111 ALERT_EVERY=10s "$B/alerter"
   start router        OPS_ADDR=:9104 "$B/router"
@@ -96,8 +105,8 @@ up)
   start connector-httpsim OPS_ADDR=:9108 VENDOR_ID=httpsim DLR_ADDR=:8090 "$B/connector"
   start webhook-dispatcher OPS_ADDR=:9109 WEBHOOK_ALLOW_PRIVATE=true "$B/webhook-dispatcher"
   ports="9101 9102 9103 9104 9105 9106 9107 9108 9109 9111"
-  if [ -n "${CHDB_PYTHON:-}" ]; then
-    start ch-writer OPS_ADDR=:9110 "$B/ch-writer"
+  if [ -n "$CH_URL" ]; then
+    start ch-writer OPS_ADDR=:9110 CLICKHOUSE_URL="$CH_URL" "$B/ch-writer"
     ports="$ports 9110"
   fi
   sleep 4

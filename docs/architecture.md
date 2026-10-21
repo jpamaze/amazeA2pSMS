@@ -55,7 +55,7 @@ Billing: every account in the sender's chain below the platform is charged (two-
 7. Per-bind limits for customer and vendor binds (`smpp_credentials`, `vendor_binds`).
 8. Automatic vendor failover on errors, latency or DLR rate.
 9. Reconciliation: messages still in `submitted` after `DLR_TIMEOUT` are expired and the customer gets an EXPIRED receipt.
-10. No single points of failure; `/readyz` checks every dependency (`platform/health`).
+10. No single points of failure; `/readyz` checks every dependency (`platform/health`). Every store is replicated with automatic failover, consumers retry a failing batch through a failover, and `wallet-resync` repairs Redis from the PostgreSQL ledger ([phase5-ha.md](phase5-ha.md)).
 
 ## Ops endpoints
 

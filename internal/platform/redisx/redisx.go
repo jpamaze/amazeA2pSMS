@@ -7,10 +7,28 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// New returns a universal client: a single node for one address, a cluster
+// Config says how to reach Redis.
+type Config struct {
+	// Addrs are the node addresses, or the Sentinel addresses when
+	// SentinelMaster is set.
+	Addrs []string
+	// SentinelMaster is the master name the Sentinels watch. Set, the client
+	// asks the Sentinels for the current primary and follows failovers.
+	SentinelMaster   string
+	Password         string
+	SentinelPassword string
+}
+
+// New returns a universal client: a Sentinel-managed primary when
+// SentinelMaster is set, else a single node for one address and a cluster
 // client for several.
-func New(addrs []string) redis.UniversalClient {
-	return redis.NewUniversalClient(&redis.UniversalOptions{Addrs: addrs})
+func New(c Config) redis.UniversalClient {
+	return redis.NewUniversalClient(&redis.UniversalOptions{
+		Addrs:            c.Addrs,
+		MasterName:       c.SentinelMaster,
+		Password:         c.Password,
+		SentinelPassword: c.SentinelPassword,
+	})
 }
 
 // Ping is a readiness check for a Redis client.

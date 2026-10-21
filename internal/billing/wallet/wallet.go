@@ -229,3 +229,45 @@ func (s *Store) Get(ctx context.Context, accountID string) (Snapshot, error) {
 	}
 	return Snapshot{Balance: Money(out[0]), CreditLimit: Money(out[1]), Held: Money(out[2])}, nil
 }
+
+//go:embed repair.lua
+var repairSrc string
+
+var repairScript = redis.NewScript(repairSrc)
+
+// Holds returns the open holds of an account (hold ID -> amount).
+func (s *Store) Holds(ctx context.Context, accountID string) (map[string]Money, error) {
+	v, err := s.rdb.HGetAll(ctx, holdsKey(accountID)).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Money, len(v))
+	for id, a := range v {
+		var n int64
+		if _, err := fmt.Sscan(a, &n); err != nil {
+			return nil, fmt.Errorf("wallet: bad hold %s: %w", id, err)
+		}
+		out[id] = Money(n)
+	}
+	return out, nil
+}
+
+// Repair sets balance and credit limit from the system of record, drops the
+// given holds and recomputes held from the holds left, atomically. Callers
+// hold the sync lock exclusively (see Exclusive). It returns held before and
+// after, and how many holds were dropped.
+func (s *Store) Repair(ctx context.Context, accountID string, balance, creditLimit Money, drop []string) (before, after Money, dropped int, err error) {
+	if creditLimit < 0 {
+		return 0, 0, 0, ErrNegativeLimit
+	}
+	args := make([]any, 0, 2+len(drop))
+	args = append(args, int64(balance), int64(creditLimit))
+	for _, d := range drop {
+		args = append(args, d)
+	}
+	res, err := repairScript.Run(ctx, s.rdb, []string{walletKey(accountID), holdsKey(accountID)}, args...).Int64Slice()
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("wallet: repair: %w", err)
+	}
+	return Money(res[0]), Money(res[1]), int(res[2]), nil
+}

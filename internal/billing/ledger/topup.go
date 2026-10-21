@@ -40,7 +40,15 @@ func (s *Service) TopUp(ctx context.Context, t TopUp) (decimal.Decimal, error) {
 	return s.credit(ctx, "topup", t)
 }
 
-func (s *Service) credit(ctx context.Context, kind string, t TopUp) (decimal.Decimal, error) {
+func (s *Service) credit(ctx context.Context, kind string, t TopUp) (bal decimal.Decimal, err error) {
+	err = wallet.Shared(ctx, s.PG, func(conn *pgxpool.Conn) error {
+		bal, err = s.creditLocked(ctx, conn, kind, t)
+		return err
+	})
+	return bal, err
+}
+
+func (s *Service) creditLocked(ctx context.Context, conn *pgxpool.Conn, kind string, t TopUp) (decimal.Decimal, error) {
 	if !t.Amount.IsPositive() {
 		return decimal.Zero, fmt.Errorf("ledger: top-up amount must be positive")
 	}
@@ -48,7 +56,7 @@ func (s *Service) credit(ctx context.Context, kind string, t TopUp) (decimal.Dec
 		return decimal.Zero, fmt.Errorf("ledger: idempotency key and actor are required")
 	}
 	var bal, limit decimal.Decimal
-	err := pgx.BeginFunc(ctx, s.PG, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `UPDATE wallets SET balance = balance + $2, updated_at = now()
 			WHERE account_id = $1 RETURNING balance, credit_limit`, t.AccountID, t.Amount).Scan(&bal, &limit); err != nil {
 			return err

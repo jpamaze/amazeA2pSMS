@@ -50,7 +50,7 @@ func main() {
 				}
 			}
 		}
-		w := &records.Writer{CH: ch}
+		w := &records.Writer{CH: ch, Log: d.Log}
 		return service.ConsumeBatch(ctx, d, "ch-writer", []string{kafka.TopicSubmit, records.Topic}, 10000,
 			func(ctx context.Context, recs []*kgo.Record) error { return w.Process(ctx, recs) })
 	})
