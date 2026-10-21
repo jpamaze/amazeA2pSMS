@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -22,6 +24,8 @@ import (
 type connectorConfig struct {
 	VendorID   string `env:"VENDOR_ID,required"`
 	SecretsKey string `env:"SECRETS_KEY"`
+	// HTTP vendors call back delivery receipts here: /dlr/<vendor>?token=<dlr_token>
+	DLRAddr string `env:"DLR_ADDR" envDefault:":8090"`
 }
 
 func main() {
@@ -30,25 +34,46 @@ func main() {
 		if err := env.Parse(&cc); err != nil {
 			return fmt.Errorf("connector config: %w", err)
 		}
-		if cc.SecretsKey == "" {
-			if d.Cfg.Env != "dev" {
-				return fmt.Errorf("SECRETS_KEY is required outside APP_ENV=dev")
-			}
-			cc.SecretsKey = secrets.DevKey
-		}
-		box, err := secrets.New(cc.SecretsKey)
+		box, err := secrets.FromEnv(cc.SecretsKey, d.Cfg.Env)
 		if err != nil {
 			return err
 		}
 		d.Log = d.Log.With("vendor", cc.VendorID)
+		c := &connector.Connector{
+			VendorID: cc.VendorID, Store: msgstore.New(d.Redis), Kafka: d.Kafka, Log: d.Log,
+		}
+		var protocol string
+		if err := d.PG.QueryRow(ctx, `SELECT protocol FROM vendors WHERE id = $1`, cc.VendorID).Scan(&protocol); err != nil {
+			return fmt.Errorf("vendor %s: %w", cc.VendorID, err)
+		}
+
+		consume := func() error {
+			return service.ConsumeBatch(ctx, d, "connector-"+cc.VendorID,
+				[]string{kafka.RouteTopic(cc.VendorID)}, 4*c.Transport.Window(),
+				func(ctx context.Context, recs []*kgo.Record) error { return c.Process(ctx, recs) })
+		}
+
+		if protocol == "http" {
+			p, err := loadHTTPProfile(ctx, d, box, cc.VendorID)
+			if err != nil {
+				return err
+			}
+			c.Transport = connector.NewHTTPTransport(p)
+			mux := http.NewServeMux()
+			mux.Handle("/dlr/"+cc.VendorID, connector.DLRHandler(p, c.JournalDLR, d.Log))
+			srv := &http.Server{Addr: cc.DLRAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			go func() {
+				d.Log.Info("HTTP DLR endpoint listening", "addr", cc.DLRAddr, "path", "/dlr/"+cc.VendorID)
+				if err := service.ServeHTTP(ctx, srv); err != nil {
+					d.Log.Error("DLR endpoint stopped", "err", err)
+				}
+			}()
+			return consume()
+		}
 
 		binds, profile, err := loadBinds(ctx, d, box, cc.VendorID)
 		if err != nil {
 			return err
-		}
-		c := &connector.Connector{
-			VendorID: cc.VendorID, TLVs: profile,
-			Store: msgstore.New(d.Redis), Kafka: d.Kafka, Log: d.Log,
 		}
 		var pool []*connector.Bind
 		for _, bc := range binds {
@@ -56,7 +81,7 @@ func main() {
 			pool = append(pool, b)
 			go b.Run(ctx)
 		}
-		c.Pool = connector.NewPool(pool)
+		c.Transport = &connector.SMPPTransport{Pool: connector.NewPool(pool), TLVs: profile}
 		d.Health.Add("vendor-bind", func(context.Context) error {
 			for _, b := range pool {
 				if b.Up() {
@@ -66,23 +91,44 @@ func main() {
 			return fmt.Errorf("no bind to %s is up", cc.VendorID)
 		})
 
-		return service.ConsumeBatch(ctx, d, "connector-"+cc.VendorID,
-			[]string{kafka.RouteTopic(cc.VendorID)}, 4*c.Pool.Window(),
-			func(ctx context.Context, recs []*kgo.Record) error { return c.Process(ctx, recs) })
+		return consume()
 	})
+}
+
+// loadHTTPProfile reads and validates an HTTP vendor's profile.
+func loadHTTPProfile(ctx context.Context, d *service.Deps, box *secrets.Box, vendorID string) (connector.HTTPProfile, error) {
+	var (
+		base                 string
+		auth, req, resp, dlr []byte
+		secretEnc            []byte
+		token                string
+		tps, concurrency     int
+	)
+	err := d.PG.QueryRow(ctx, `SELECT base_url, auth, request_template, response_mapping, dlr_mapping,
+		secret_enc, dlr_token, tps_limit, concurrency FROM http_vendor_profiles WHERE vendor_id = $1`, vendorID).
+		Scan(&base, &auth, &req, &resp, &dlr, &secretEnc, &token, &tps, &concurrency)
+	if err != nil {
+		return connector.HTTPProfile{}, fmt.Errorf("http vendor %s profile: %w", vendorID, err)
+	}
+	p, err := connector.ParseHTTPProfile(base, auth, req, resp, dlr)
+	if err != nil {
+		return p, err
+	}
+	if len(secretEnc) > 0 {
+		sec, err := box.Open(secretEnc)
+		if err != nil {
+			return p, fmt.Errorf("http vendor %s secret: %w", vendorID, err)
+		}
+		p.Secret = string(sec)
+	}
+	p.DLRToken, p.TPS, p.Concurrency = token, tps, concurrency
+	return p, nil
 }
 
 // loadBinds reads the vendor's enabled binds and decrypts their passwords.
 // All binds of a vendor share the TLV profile of the first bind.
 func loadBinds(ctx context.Context, d *service.Deps, box *secrets.Box, vendorID string) ([]connector.BindConfig, connector.TLVProfile, error) {
 	var profile connector.TLVProfile
-	var protocol string
-	if err := d.PG.QueryRow(ctx, `SELECT protocol FROM vendors WHERE id = $1`, vendorID).Scan(&protocol); err != nil {
-		return nil, profile, fmt.Errorf("vendor %s: %w", vendorID, err)
-	}
-	if protocol != "smpp" {
-		return nil, profile, fmt.Errorf("vendor %s uses %s; only SMPP connectors exist in this release", vendorID, protocol)
-	}
 	rows, err := d.PG.Query(ctx, `
 		SELECT id, host, port, tls, system_id, password_enc, system_type, smpp_version, bind_type,
 		       window_size, tps_limit, tlv_profile

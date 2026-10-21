@@ -37,6 +37,18 @@ func New(hexKey string) (*Box, error) {
 	return &Box{aead: aead}, nil
 }
 
+// FromEnv builds a Box from SECRETS_KEY, falling back to DevKey only when
+// appEnv is "dev".
+func FromEnv(hexKey, appEnv string) (*Box, error) {
+	if hexKey == "" {
+		if appEnv != "dev" {
+			return nil, errors.New("secrets: SECRETS_KEY is required outside APP_ENV=dev")
+		}
+		hexKey = DevKey
+	}
+	return New(hexKey)
+}
+
 // Seal encrypts plaintext; the nonce is prepended.
 func (b *Box) Seal(plaintext []byte) ([]byte, error) {
 	nonce := make([]byte, b.aead.NonceSize())

@@ -2,20 +2,22 @@
 
 A carrier-grade A2P SMS platform: customer SMPP (3.3/3.4/5.0) and HTTP in, vendor SMPP and HTTP out, built for 5,000 TPS sustained and 10,000 burst. Launching in India with full DLT.
 
-Status: **Phase 1, Core messaging, slice 1.** Messages go end to end: customer SMPP or HTTP → Kafka → router → vendor SMPP connector → delivery receipt back to the customer, with wallet holds and ledger charges. Tested at 4,859 accepted TPS on a single 4-core box with zero loss. See [docs/phase1-core-messaging.md](docs/phase1-core-messaging.md) for what is built, the test results and what comes next.
+Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: customer SMPP or HTTP → Kafka → router → vendor SMPP or HTTP connector → delivery receipt back to the customer (deliver_sm or signed webhook), with wallet holds, ledger charges and history in ClickHouse. Customers can be onboarded through the admin API. Tested at 4,859 accepted TPS on a single 4-core box with zero loss. See [docs/phase1-core-messaging.md](docs/phase1-core-messaging.md) for what is built, the test results and what comes next.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `cmd/smpp-server`, `cmd/http-api` | Customer edges: auth, limits, balance hold, write to Kafka |
-| `cmd/admin-api` | Accounts, config, credit limits (`PUT /v1/accounts/{id}/credit-limit`, dev only until auth) |
+| `cmd/admin-api` | Accounts, top-ups, credit limits, rate cards, SMPP credentials, API keys, webhooks (dev only until auth) |
 | `cmd/router` | Picks a vendor (LCR / priority / weighted) |
-| `cmd/connector` | Outbound SMPP binds to one vendor (`VENDOR_ID`), DLR journal |
+| `cmd/connector` | Sends to one vendor (`VENDOR_ID`) over SMPP or HTTP; journals its DLRs |
+| `cmd/webhook-dispatcher` | Signed delivery-status webhooks to HTTP customers, with retries |
+| `cmd/ch-writer` | Message history to ClickHouse |
 | `cmd/dlr-processor` | Matches DLRs, message state, customer receipts, expiry of messages with no DLR |
 | `cmd/rater` | Settles holds, writes the ledger in batches |
 | `cmd/migrate` | Applies `migrations/postgres` |
-| `cmd/devkafka`, `cmd/smpp-sim`, `cmd/smpp-load`, `cmd/devseed` | Dev tools: in-memory Kafka, vendor simulator, load generator, demo data |
+| `cmd/devkafka`, `cmd/smpp-sim`, `cmd/http-sim`, `cmd/smpp-load`, `cmd/devseed` | Dev tools: in-memory Kafka, SMPP and HTTP vendor simulators, load generator, demo data |
 | `internal/smpp/{pdu,session,gsm7}` | Own SMPP 3.3/3.4/5.0 library and GSM-7/UCS-2 encoding |
 | `internal/ingest`, `internal/msgstore`, `internal/routing`, `internal/connector`, `internal/dlr` | Message path packages |
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
@@ -54,7 +56,19 @@ curl -X POST localhost:8080/v1/sms -H "X-API-Key: <key from seed output>" \
 curl localhost:8080/v1/sms/<id> -H "X-API-Key: <key>"
 ```
 
-Ports: SMPP 2775, HTTP 8080, admin 8081, simulator 2776, ops (`/healthz`, `/readyz`, `/metrics`) 9101–9107.
+Ports: SMPP 2775, HTTP 8080, admin 8081, HTTP-vendor DLR callback 8090, SMPP simulator 2776, HTTP simulator 2777, ClickHouse 8123, ops (`/healthz`, `/readyz`, `/metrics`) 9101–9110.
+
+Without Docker, ClickHouse is optional: `pip install chdb` into a virtualenv and run `CHDB_PYTHON=<that python> scripts/dev-local.sh up` to add a ClickHouse stand-in and the ch-writer. `ROUTE=httpsim` sends the demo customer's traffic through the HTTP vendor simulator.
+
+Onboard a customer through the admin API (dev auth: `X-Actor-Account` = platform account ID, `X-Actor-User` = your name):
+
+```sh
+POST /v1/accounts                       {"name":"Acme","role":"customer","rate_card_id":"<GET /v1/rate-cards>"}
+POST /v1/accounts/{id}/topups           {"amount":"5000","reference":"NEFT 123"}   + Idempotency-Key header
+POST /v1/accounts/{id}/api-keys         {"name":"prod"}                            -> key shown once
+POST /v1/accounts/{id}/smpp-credentials {"system_id":"acme","password":"acme1234","tps":100,"max_binds":4}
+PUT  /v1/accounts/{id}/webhook          {"url":"https://acme.example/sms-status"}  -> signing secret shown once
+```
 
 ## Test
 
@@ -74,6 +88,6 @@ powershell -ExecutionPolicy Bypass -File D:\ZAPIM\SMPP\amazeA2pSMS\scripts\sync-
 
 The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` to skip the push, or `-RepoPath` / `-BundlePath` to use other paths.
 
-## Next: Phase 1, slice 2
+## Next
 
-HTTP vendor connector, customer webhooks, ClickHouse writer, admin top-ups that load wallets into Redis, cross-node bind limits, and the 5,000 TPS gate on production-shaped hardware.
+The 5,000 TPS gate on production-shaped hardware (separate nodes, 3-broker Kafka, real ClickHouse), admin authentication (Keycloak), then phase 2 (billing and commercial) and phase 3 (DLT template matching, firewall, HLR/MNP, vendor failover).

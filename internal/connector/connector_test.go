@@ -12,8 +12,8 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/session"
 )
 
-func newConn() *Connector {
-	return &Connector{VendorID: "v", TLVs: TLVProfile{PEID: 0x1400, TemplateID: 0x1401, TMChain: 0x1402}}
+func newConn() *SMPPTransport {
+	return &SMPPTransport{TLVs: TLVProfile{PEID: 0x1400, TemplateID: 0x1401, TMChain: 0x1402}}
 }
 
 func TestBuildSingleWithDLT(t *testing.T) {

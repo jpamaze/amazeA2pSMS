@@ -59,6 +59,7 @@ func (s *Service) SetLimit(ctx context.Context, c Change) error {
 		return fmt.Errorf("credit: actor and reason are required")
 	}
 
+	var balance decimal.Decimal
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var parentID *string
 		var actorRole string
@@ -83,8 +84,8 @@ func (s *Service) SetLimit(ctx context.Context, c Change) error {
 			c.ActorUser, c.Reason); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE wallets SET credit_limit = $2 WHERE account_id = $1`,
-			c.AccountID, c.NewLimit)
+		err = tx.QueryRow(ctx, `UPDATE wallets SET credit_limit = $2 WHERE account_id = $1 RETURNING balance`,
+			c.AccountID, c.NewLimit).Scan(&balance)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23514" && strings.Contains(pgErr.Message, "reseller") {
 			return fmt.Errorf("%w: %s", ErrResellerLimit, pgErr.Message)
@@ -96,9 +97,8 @@ func (s *Service) SetLimit(ctx context.Context, c Change) error {
 	}
 
 	if s.wallets != nil {
-		// Committed; push only the limit. The Redis balance runs ahead of the
-		// database between settlement batches, so it must not be overwritten here.
-		if err := s.wallets.SetCreditLimit(ctx, c.AccountID, wallet.FromDecimal(c.NewLimit)); err != nil {
+		// Committed; push the limit (and load the wallet if Redis lacks it).
+		if err := s.wallets.ApplyCreditLimit(ctx, c.AccountID, wallet.FromDecimal(c.NewLimit), wallet.FromDecimal(balance)); err != nil {
 			return fmt.Errorf("credit: limit saved but cache update failed: %w", err)
 		}
 	}

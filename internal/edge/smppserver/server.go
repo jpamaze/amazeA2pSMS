@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
@@ -64,13 +65,12 @@ type Server struct {
 	store  *msgstore.Store
 	log    *slog.Logger
 
-	mu       sync.Mutex
-	byAcct   map[string][]*session.Session // receiver-capable sessions per account
-	bySystem map[string]int                // bound sessions per system_id
-	all      map[*session.Session]struct{}
-	pumps    map[string]context.CancelFunc
-	rr       map[string]int
-	ctx      context.Context
+	mu     sync.Mutex
+	byAcct map[string][]*session.Session // receiver-capable sessions per account
+	all    map[*session.Session]struct{}
+	pumps  map[string]context.CancelFunc
+	rr     map[string]int
+	ctx    context.Context
 }
 
 type bindKind int
@@ -85,7 +85,12 @@ type bindState struct {
 	cred    auth.SMPPCredential
 	kind    bindKind
 	limiter *rate.Limiter
+	lease   string // member in the cross-node bind registry
 }
+
+// bindLease is how long a bind slot survives without a refresh (a crashed
+// node's binds free up after this).
+const bindLease = 90 * time.Second
 
 // New returns a Server.
 func New(cfg Config, a Authenticator, acc Acceptor, store *msgstore.Store, log *slog.Logger) *Server {
@@ -103,8 +108,8 @@ func New(cfg Config, a Authenticator, acc Acceptor, store *msgstore.Store, log *
 	}
 	return &Server{
 		cfg: cfg, auth: a, accept: acc, store: store, log: log,
-		byAcct: map[string][]*session.Session{}, bySystem: map[string]int{},
-		all: map[*session.Session]struct{}{}, pumps: map[string]context.CancelFunc{}, rr: map[string]int{},
+		byAcct: map[string][]*session.Session{},
+		all:    map[*session.Session]struct{}{}, pumps: map[string]context.CancelFunc{}, rr: map[string]int{},
 	}
 }
 
@@ -114,6 +119,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.ctx = ctx
 	s.mu.Unlock()
 	go func() { <-ctx.Done(); ln.Close() }()
+	go s.refreshLeases(ctx)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -209,17 +215,18 @@ func (s *Server) bind(sess *session.Session, req *pdu.PDU) {
 		kind = kindRX
 	}
 
-	s.mu.Lock()
-	if s.bySystem[cred.SystemID] >= cred.MaxBinds {
-		s.mu.Unlock()
+	// Max binds is enforced across every SMPP node through Redis.
+	lease := s.cfg.NodeID + ":" + uuid.NewString()
+	ok, err := s.store.AcquireBind(ctx, cred.SystemID, lease, cred.MaxBinds, bindLease)
+	if err != nil || !ok {
 		_ = sess.Respond(req, pdu.StatusBindFail, nil)
 		time.AfterFunc(100*time.Millisecond, sess.Close)
-		s.log.Info("bind refused: max binds", "system_id", cred.SystemID, "max", cred.MaxBinds)
+		s.log.Info("bind refused: max binds", "system_id", cred.SystemID, "max", cred.MaxBinds, "err", err)
 		return
 	}
-	s.bySystem[cred.SystemID]++
 	tps := cred.TPS
-	sess.SetData(&bindState{cred: cred, kind: kind, limiter: rate.NewLimiter(rate.Limit(tps), max(1, tps/10))})
+	s.mu.Lock()
+	sess.SetData(&bindState{cred: cred, kind: kind, lease: lease, limiter: rate.NewLimiter(rate.Limit(tps), max(1, tps/10))})
 	var pumpCtx context.Context
 	if kind != kindTX {
 		s.byAcct[cred.AccountID] = append(s.byAcct[cred.AccountID], sess)
@@ -249,10 +256,11 @@ func (s *Server) onClose(sess *session.Session, err error) {
 	if st == nil {
 		return
 	}
-	s.bySystem[st.cred.SystemID]--
-	if s.bySystem[st.cred.SystemID] <= 0 {
-		delete(s.bySystem, st.cred.SystemID)
-	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.store.ReleaseBind(ctx, st.cred.SystemID, st.lease)
+	}()
 	if st.kind != kindTX {
 		list := s.byAcct[st.cred.AccountID]
 		for i, x := range list {
@@ -356,6 +364,35 @@ func statusFor(err error) uint32 {
 		return pdu.StatusMsgQFul // temporary: the customer should retry
 	}
 	return pdu.StatusSysErr
+}
+
+// refreshLeases keeps this node's bind slots alive in the registry.
+func (s *Server) refreshLeases(ctx context.Context) {
+	tick := time.NewTicker(bindLease / 3)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		bySystem := map[string][]string{}
+		s.mu.Lock()
+		for sess := range s.all {
+			if st, ok := sess.Data().(*bindState); ok {
+				bySystem[st.cred.SystemID] = append(bySystem[st.cred.SystemID], st.lease)
+			}
+		}
+		s.mu.Unlock()
+		if len(bySystem) == 0 {
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := s.store.RefreshBinds(rctx, bySystem, bindLease); err != nil {
+			s.log.Warn("bind lease refresh", "err", err)
+		}
+		cancel()
+	}
 }
 
 // receiverFor picks a receiver-capable session for the account, round-robin.

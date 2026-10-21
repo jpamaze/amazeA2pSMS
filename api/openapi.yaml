@@ -6,6 +6,15 @@ info:
     Customer HTTP API. A 202 means the message is durably queued and its cost
     is held against wallet balance + credit limit. Delivery status arrives by
     webhook or GET /v1/sms/{id}.
+
+    Webhooks: when a message reaches a final status, the platform POSTs
+    {"event":"message.status","id","status","error_code","to","sender",
+    "segments","cost","client_ref","accepted_at","completed_at"} to the
+    account's webhook URL with header
+    X-Amaze-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">
+    keyed by the account's webhook secret. Answer 2xx within 10 s; other
+    answers are retried after 30 s, 5 min, 30 min and 2 h. Delivery is
+    at-least-once: de-duplicate by id.
 servers:
   - url: https://api.example.com
 security:

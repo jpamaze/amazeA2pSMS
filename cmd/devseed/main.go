@@ -31,6 +31,8 @@ func main() {
 	balance := flag.String("balance", "100000", "demo customer wallet balance (INR)")
 	price := flag.String("price", "0.12", "customer price per segment (INR)")
 	tps := flag.Int("tps", 10000, "demo SMPP credential TPS limit per bind")
+	flag.StringVar(&httpSimURL, "http-sim-url", "http://127.0.0.1:2777", "http-sim base URL")
+	flag.StringVar(&routeTo, "route", "sim", "vendor for the demo customer: sim (SMPP, via LCR) or httpsim (HTTP)")
 	flag.Parse()
 
 	if err := run(*simHost, *simPort, *simBinds, *balance, *price, *tps); err != nil {
@@ -38,6 +40,11 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+var httpSimURL, routeTo string
+
+// DevDLRToken is the HTTP simulator's callback token in dev data.
+const DevDLRToken = "devtoken"
 
 func run(simHost string, simPort, simBinds int, balance, price string, tps int) error {
 	var cfg config.Common
@@ -163,6 +170,40 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 			VALUES ('sim', '404', '*', 0.05, '2020-01-01') ON CONFLICT DO NOTHING`); err != nil {
 			return err
 		}
+		// HTTP vendor simulator (dearer than sim, so LCR prefers sim).
+		if _, err := tx.Exec(ctx, `INSERT INTO vendors (id, name, protocol) VALUES ('httpsim', 'HTTP simulator', 'http')
+			ON CONFLICT (id) DO UPDATE SET status = 'active'`); err != nil {
+			return err
+		}
+		key, err := box.Seal([]byte("simkey"))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO http_vendor_profiles
+			(vendor_id, base_url, auth, request_template, response_mapping, dlr_mapping, tps_limit, secret_enc, dlr_token, concurrency)
+			VALUES ('httpsim', $1, '{"type":"bearer"}',
+			  '{"path":"/send","encoding":"json","params":{"to":"{{to_national}}","from":"{{sender}}","msg":"{{text}}","entity":"{{pe_id}}","tpl":"{{template_id}}","uni":"{{unicode}}","ref":"{{id}}"}}',
+			  '{"success_path":"status","success_values":["success"],"id_path":"data.0.msgid","error_path":"code"}',
+			  '{"id_param":"msgid","status_param":"status","error_param":"err","delivered_values":["DELIVERED"],"expired_values":["EXPIRED"]}',
+			  5000, $2, $3, 200)
+			ON CONFLICT (vendor_id) DO UPDATE SET base_url = EXCLUDED.base_url, secret_enc = EXCLUDED.secret_enc,
+			  dlr_token = EXCLUDED.dlr_token`, httpSimURL, key, DevDLRToken); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO vendor_costs (vendor_id, mcc, mnc, cost, valid_from)
+			VALUES ('httpsim', '404', '*', 0.06, '2020-01-01') ON CONFLICT DO NOTHING`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM routes WHERE account_id = $1`, customerID); err != nil {
+			return err
+		}
+		if routeTo == "httpsim" {
+			if _, err := tx.Exec(ctx, `INSERT INTO routes (account_id, mcc, mnc, mode, vendor_id, priority)
+				VALUES ($1, '404', '*', 'priority', 'httpsim', 1)`, customerID); err != nil {
+				return err
+			}
+		}
+
 		var n int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM routes WHERE account_id IS NULL AND mcc = '404'`).Scan(&n); err != nil {
 			return err
@@ -192,7 +233,8 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
   wallet balance   : %s INR (credit limit %s)
   SMPP             : system_id=demo password=demo123 (port 2775)
   HTTP API key     : %s
-  vendor           : sim -> %s:%d (%d binds)
-`, customerID, bal.StringFixed(2), limit.StringFixed(2), apiKey, simHost, simPort, simBinds)
+  vendor           : sim -> %s:%d (%d binds); httpsim -> %s (DLR token %q)
+  demo routed to   : %s
+`, customerID, bal.StringFixed(2), limit.StringFixed(2), apiKey, simHost, simPort, simBinds, httpSimURL, DevDLRToken, routeTo)
 	return nil
 }

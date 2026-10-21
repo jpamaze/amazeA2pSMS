@@ -14,6 +14,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kfake"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
+	"github.com/jpamaze/amazeA2pSMS/internal/records"
+	"github.com/jpamaze/amazeA2pSMS/internal/webhook"
 )
 
 func main() {
@@ -27,7 +29,7 @@ func main() {
 		kfake.Ports(*port),
 		kfake.AllowAutoTopicCreation(),
 		kfake.DefaultNumPartitions(*partitions),
-		kfake.SeedTopics(int32(*partitions), kafka.AllTopics(strings.Split(*vendors, ","))...),
+		kfake.SeedTopics(int32(*partitions), append(append(kafka.AllTopics(strings.Split(*vendors, ",")), webhook.Topics()...), records.Topic)...),
 	}
 	if *dataDir != "" {
 		opts = append(opts, kfake.DataDir(*dataDir))

@@ -1,4 +1,4 @@
-SERVICES := smpp-server http-api admin-api router rater dlr-processor connector migrate smpp-sim devseed
+SERVICES := smpp-server http-api admin-api router rater dlr-processor connector webhook-dispatcher ch-writer migrate smpp-sim http-sim devseed
 COMPOSE  := docker compose -f deploy/docker-compose.yml
 
 .PHONY: build test lint fmt migrate up down logs images dev-up dev-down load

@@ -193,3 +193,36 @@ func TestMoneyConversion(t *testing.T) {
 		t.Fatalf("-5000 -> %s", got)
 	}
 }
+
+func TestTopUpAndLimitLoadMissingWallet(t *testing.T) {
+	s, acct := newStore(t)
+	ctx := context.Background()
+
+	// Wallet not in Redis: the top-up loads the database values (which
+	// already include it) instead of adding to zero.
+	bal, err := s.ApplyTopUp(ctx, acct, rupees("50"), rupees("150"), rupees("10"))
+	if err != nil || bal != rupees("150") {
+		t.Fatalf("load on top-up: %s %v", bal.Decimal(), err)
+	}
+	snap, _ := s.Get(ctx, acct)
+	if snap.CreditLimit != rupees("10") || snap.Available() != rupees("160") {
+		t.Fatalf("loaded wallet: %+v", snap)
+	}
+
+	// Loaded: only the delta is applied (the Redis balance may be ahead of the DB).
+	_ = s.Hold(ctx, acct, "h", rupees("20"))
+	_, _ = s.Settle(ctx, acct, "h", rupees("20"))
+	bal, _ = s.ApplyTopUp(ctx, acct, rupees("5"), rupees("999"), rupees("10"))
+	if bal != rupees("135") {
+		t.Fatalf("delta top-up: %s", bal.Decimal())
+	}
+
+	// Credit limit on a loaded wallet changes only the limit.
+	if err := s.ApplyCreditLimit(ctx, acct, rupees("25"), rupees("999")); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = s.Get(ctx, acct)
+	if snap.Balance != rupees("135") || snap.CreditLimit != rupees("25") {
+		t.Fatalf("limit change touched balance: %+v", snap)
+	}
+}

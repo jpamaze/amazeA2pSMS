@@ -144,6 +144,32 @@ func (s *Store) TopUp(ctx context.Context, accountID string, amount Money) (Mone
 	return Money(v), err
 }
 
+//go:embed setlimit.lua
+var setLimitSrc string
+var setLimitScript = redis.NewScript(setLimitSrc)
+
+// ApplyCreditLimit sets a committed credit limit on the hot copy, loading the
+// wallet from dbBalance if it is not in Redis yet.
+func (s *Store) ApplyCreditLimit(ctx context.Context, accountID string, limit, dbBalance Money) error {
+	if limit < 0 {
+		return ErrNegativeLimit
+	}
+	return setLimitScript.Run(ctx, s.rdb, []string{walletKey(accountID)}, int64(limit), int64(dbBalance)).Err()
+}
+
+//go:embed topup.lua
+var topupSrc string
+var topupScript = redis.NewScript(topupSrc)
+
+// ApplyTopUp adds a committed top-up to the hot copy. If the wallet is not in
+// Redis yet (new account, or Redis was rebuilt) it is loaded from the
+// database values, which already include the top-up.
+func (s *Store) ApplyTopUp(ctx context.Context, accountID string, amount, dbBalance, dbCreditLimit Money) (Money, error) {
+	v, err := topupScript.Run(ctx, s.rdb, []string{walletKey(accountID)},
+		int64(amount), int64(dbBalance), int64(dbCreditLimit)).Int64()
+	return Money(v), err
+}
+
 // SetCreditLimit changes the credit limit. Lowering it below credit already
 // used is allowed: new holds fail until a top-up brings available above zero.
 // Reseller and audit rules are enforced by the caller (admin-api) and the

@@ -39,7 +39,7 @@ func TestLifecycleAndDuplicateDLRs(t *testing.T) {
 	if err := s.Create(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MapVendorIDs(ctx, "sim", id, []string{"v1", "v2"}); err != nil {
+	if err := s.MapVendorIDs(ctx, "sim", id, []string{"v1", "v2"}, "0.1"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.Lookup(ctx, "sim", "v2"); got != id {
@@ -73,10 +73,12 @@ func TestLifecycleAndDuplicateDLRs(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 
-	first, _ := s.ClaimReceipt(ctx, id)
-	second, _ := s.ClaimReceipt(ctx, id)
-	if !first || second {
-		t.Fatal("receipt must be claimed exactly once")
+	if st.ReceiptSent {
+		t.Fatal("receipt not sent yet")
+	}
+	_ = s.MarkReceiptSent(ctx, id)
+	if st, _ := s.Get(ctx, id); !st.ReceiptSent {
+		t.Fatal("receipt mark lost")
 	}
 	if _, err := s.Apply(ctx, "missing-"+id, domain.StatusDelivered, "", time.Now()); err != ErrNotFound {
 		t.Fatalf("missing record: %v", err)

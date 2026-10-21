@@ -28,10 +28,16 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 | admin-api | REST | — | PG, Redis |
 | router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, refreshed from PG |
 | connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
-| dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}` | Redis |
+| dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis |
 | rater | `sms.status` | — | Redis wallet, PG ledger + `rater_offsets` |
+| webhook-dispatcher | `sms.webhooks`, `sms.webhooks.retry.1-4` | retry tiers, `sms.webhooks.dead` | PG (webhook URL, encrypted secret) |
+| ch-writer | `sms.submit`, `sms.records` | ClickHouse `message_records` | — |
 
-Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency).
+HTTP vendors: the connector POSTs per `http_vendor_profiles` and serves `/dlr/<vendor>?token=…` on `DLR_ADDR`; receipts go to `sms.dlr` exactly like SMPP ones.
+
+Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency), `binds:{system_id}` (cross-node bind leases).
+
+Final receipts (deliver_sm or webhook) and the ClickHouse row are queued before the message is marked notified, so a crash repeats rather than loses them; customers should treat receipts and webhooks as at-least-once and de-duplicate by message ID.
 
 Billing: the customer is charged when the vendor accepts a message (`submitted`, or `failed` after at least one part was accepted) and the hold is released when the platform rejects it or no part was accepted.
 

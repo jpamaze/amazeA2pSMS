@@ -23,6 +23,10 @@ create sms.dlr             "$PARTITIONS" "$H72"
 create sms.mo              "$PARTITIONS" "$H72"
 create sms.billing.events  "$PARTITIONS" "$D7"
 create sms.config.changes  1             "$D7"
+create sms.webhooks        "$PARTITIONS" "$H72"
+create sms.records         "$PARTITIONS" "$H72"
+for i in 1 2 3 4; do create "sms.webhooks.retry.$i" "$PARTITIONS" "$D7"; done
+create sms.webhooks.dead   1             "$D7"
 for v in $VENDORS; do
   create "sms.route.$v" "$PARTITIONS" "$H72"
 done

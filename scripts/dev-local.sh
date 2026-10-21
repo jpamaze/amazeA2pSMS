@@ -8,6 +8,9 @@
 #   scripts/dev-local.sh load    # 30 s load test at $TPS (default 1000)
 #
 # Needs: Go, a PostgreSQL database `sms` owned by user sms/sms, Redis on 6379.
+# Optional: CHDB_PYTHON=<python with `pip install chdb`> runs a ClickHouse
+# stand-in on :8123 and the ch-writer; without it, ch-writer is skipped.
+# ROUTE=httpsim sends the demo customer's traffic through the HTTP vendor.
 # WARNING: `up` wipes the `sms` database schema and FLUSHALLs Redis.
 set -euo pipefail
 
@@ -22,6 +25,7 @@ export KAFKA_BROKERS=${KAFKA_BROKERS:-localhost:9092}
 
 stop() {
   pkill -f "$B/" 2>/dev/null || true
+  pkill -f "scripts/ch-dev-server.py" 2>/dev/null || true
   for _ in $(seq 1 40); do pgrep -f "$B/" >/dev/null || return 0; sleep 0.25; done
   echo "some processes did not stop:" >&2
   pgrep -af "$B/" >&2
@@ -44,8 +48,14 @@ up)
   "$B/migrate" >"$L/migrate.log" 2>&1
   start devkafka "$B/devkafka" -port 9092 -partitions 12
   start smpp-sim "$B/smpp-sim" -addr :2776 -dlr-delay "${DLR_DELAY:-200ms}" -fail "${FAIL:-0.02}"
+  start http-sim "$B/http-sim" -addr :2777 -dlr-url "http://127.0.0.1:8090/dlr/httpsim?token=devtoken" \
+    -dlr-delay "${DLR_DELAY:-200ms}" -fail "${FAIL:-0.02}"
+  if [ -n "${CHDB_PYTHON:-}" ]; then
+    rm -rf "$ROOT/.dev/chdb"
+    start ch-dev-server "$CHDB_PYTHON" -I "$ROOT/scripts/ch-dev-server.py" --port 8123 --path "$ROOT/.dev/chdb"
+  fi
   sleep 1
-  "$B/devseed" ${SEED_ARGS:-} | tee "$L/seed.log"
+  "$B/devseed" -route "${ROUTE:-sim}" ${SEED_ARGS:-} | tee "$L/seed.log"
   start smpp-server   OPS_ADDR=:9101 "$B/smpp-server"
   start http-api      OPS_ADDR=:9102 "$B/http-api"
   start admin-api     OPS_ADDR=:9103 "$B/admin-api"
@@ -53,8 +63,15 @@ up)
   start rater         OPS_ADDR=:9105 "$B/rater"
   start dlr-processor OPS_ADDR=:9106 DLR_TIMEOUT="${DLR_TIMEOUT:-72h}" "$B/dlr-processor"
   start connector-sim OPS_ADDR=:9107 VENDOR_ID=sim "$B/connector"
+  start connector-httpsim OPS_ADDR=:9108 VENDOR_ID=httpsim DLR_ADDR=:8090 "$B/connector"
+  start webhook-dispatcher OPS_ADDR=:9109 WEBHOOK_ALLOW_PRIVATE=true "$B/webhook-dispatcher"
+  ports="9101 9102 9103 9104 9105 9106 9107 9108 9109"
+  if [ -n "${CHDB_PYTHON:-}" ]; then
+    start ch-writer OPS_ADDR=:9110 "$B/ch-writer"
+    ports="$ports 9110"
+  fi
   sleep 4
-  for p in 9101 9102 9103 9104 9105 9106 9107; do
+  for p in $ports; do
     printf 'ops :%s readyz %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "localhost:$p/readyz")"
   done
   echo "logs: $L"

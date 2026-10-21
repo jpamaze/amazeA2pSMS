@@ -15,6 +15,8 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
+	"github.com/jpamaze/amazeA2pSMS/internal/records"
+	"github.com/jpamaze/amazeA2pSMS/internal/webhook"
 )
 
 // MatchWindow is how long an unmatched DLR is re-queued waiting for its
@@ -97,15 +99,16 @@ func (p *Processor) handle(ctx context.Context, rec *kgo.Record) (*kgo.Record, e
 }
 
 func (p *Processor) status(ctx context.Context, ev domain.StatusEvent) error {
-	changed, err := p.Store.Apply(ctx, ev.MessageID, ev.Status, ev.ErrorCode, ev.At)
+	_, err := p.Store.Apply(ctx, ev.MessageID, ev.Status, ev.ErrorCode, ev.At)
 	if errors.Is(err, msgstore.ErrNotFound) {
 		return nil // expired record; nothing to update
 	}
 	if err != nil {
 		return err
 	}
-	if changed && ev.Status.Final() {
-		return p.notify(ctx, ev.MessageID, ev.Status, ev.ErrorCode)
+	if ev.Status.Final() {
+		// Also on replay (Apply unchanged): notify checks whether the receipt went out.
+		return p.notify(ctx, ev.MessageID)
 	}
 	return nil
 }
@@ -148,11 +151,10 @@ func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR) 
 	// Receipt dates have minute resolution; the time we received the final
 	// receipt is the accurate completion time.
 	at := d.ReceivedAt
-	changed, err := p.Store.Apply(ctx, msgID, final, code, at)
-	if err != nil || !changed {
+	if _, err := p.Store.Apply(ctx, msgID, final, code, at); err != nil {
 		return nil, ignoreNotFound(err)
 	}
-	return nil, p.notify(ctx, msgID, final, code)
+	return nil, p.notify(ctx, msgID)
 }
 
 // Reconcile expires messages that have waited longer than timeout for a
@@ -177,42 +179,69 @@ func (p *Processor) Reconcile(ctx context.Context, timeout, every time.Duration)
 			if len(ids) == 0 {
 				break
 			}
+			failures := 0
 			for _, id := range ids {
-				changed, err := p.Store.Apply(ctx, id, domain.StatusExpired, "NO_DLR", time.Now().UTC())
+				_, err := p.Store.Apply(ctx, id, domain.StatusExpired, "NO_DLR", time.Now().UTC())
 				switch {
-				case errors.Is(err, msgstore.ErrNotFound) || (err == nil && !changed):
-					_ = p.Store.UntrackInflight(ctx, id) // record gone or already final
+				case errors.Is(err, msgstore.ErrNotFound):
+					_ = p.Store.UntrackInflight(ctx, id) // record gone
 				case err != nil:
+					failures++
 					p.Log.Warn("reconcile apply", "message", id, "err", err)
 				default:
-					if err := p.notify(ctx, id, domain.StatusExpired, "NO_DLR"); err != nil {
+					_ = p.Store.UntrackInflight(ctx, id) // already final: drop from the index
+					if err := p.notify(ctx, id); err != nil {
 						p.Log.Warn("reconcile notify", "message", id, "err", err)
 					}
 				}
 			}
 			p.Log.Info("expired messages without DLR", "count", len(ids))
+			if failures > 0 {
+				break // retry on the next tick rather than spin on the same IDs
+			}
 		}
 	}
 }
 
-// notify queues the customer's final receipt once, if they asked for one.
-// HTTP customers read status by API now; webhooks come in the next slice.
-func (p *Processor) notify(ctx context.Context, msgID string, st domain.MessageStatus, code string) error {
+// notify queues the customer's final receipt from the stored state: a
+// deliver_sm for SMPP customers who asked for receipts, a webhook event for
+// HTTP customers. It is marked sent only after queuing (at-least-once).
+func (p *Processor) notify(ctx context.Context, msgID string) error {
 	s, err := p.Store.Get(ctx, msgID)
 	if err != nil {
 		return ignoreNotFound(err)
 	}
-	if s.Channel != domain.ChannelSMPP || !s.RegisteredDelivery {
+	if !s.Status.Final() || s.ReceiptSent {
 		return nil
 	}
-	first, err := p.Store.ClaimReceipt(ctx, msgID)
-	if err != nil || !first {
+	// History row for ClickHouse, published with the receipt (same at-least-once guarantee).
+	if err := records.Publish(ctx, p.Kafka, s); err != nil {
 		return err
 	}
-	return p.Store.EnqueueReceipt(ctx, s.AccountID, msgstore.Receipt{
-		MessageID: msgID, Stat: receiptStat(st), Err: numericErr(code),
-		Sender: s.Sender, Dest: s.Destination, Submitted: s.AcceptedAt, Done: s.DoneAt,
-	})
+	switch s.Channel {
+	case domain.ChannelSMPP:
+		if !s.RegisteredDelivery {
+			return nil
+		}
+		err = p.Store.EnqueueReceipt(ctx, s.AccountID, msgstore.Receipt{
+			MessageID: msgID, Stat: receiptStat(s.Status), Err: numericErr(s.ErrorCode),
+			Sender: s.Sender, Dest: s.Destination, Submitted: s.AcceptedAt, Done: s.DoneAt,
+		})
+	case domain.ChannelHTTP:
+		ev := webhook.Event{
+			ID: msgID, AccountID: s.AccountID, Status: string(s.Status), ErrorCode: s.ErrorCode,
+			To: s.Destination, Sender: s.Sender, Segments: s.Segments, Cost: s.Price, ClientRef: s.ClientRef,
+			AcceptedAt: s.AcceptedAt.Format(time.RFC3339Nano),
+		}
+		if !s.DoneAt.IsZero() {
+			ev.CompletedAt = s.DoneAt.Format(time.RFC3339Nano)
+		}
+		err = webhook.Publish(ctx, p.Kafka, ev)
+	}
+	if err != nil {
+		return err
+	}
+	return p.Store.MarkReceiptSent(ctx, msgID)
 }
 
 func receiptStat(st domain.MessageStatus) string {

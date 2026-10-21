@@ -45,7 +45,7 @@ jobs:
     needs: test
     strategy:
       matrix:
-        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, migrate, smpp-sim, devseed]
+        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, migrate, smpp-sim, http-sim, devseed]
     steps:
       - uses: actions/checkout@v4
       - run: docker build --build-arg SERVICE=${{ matrix.service }} -t amaze-sms/${{ matrix.service }}:${{ github.sha }} .

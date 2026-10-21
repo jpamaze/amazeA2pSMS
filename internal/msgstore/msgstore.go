@@ -57,6 +57,11 @@ type State struct {
 	RegisteredDelivery bool
 	AcceptedAt         time.Time
 	DoneAt             time.Time
+	ReceiptSent        bool // the customer's final receipt or webhook was queued
+	MCC, MNC           string
+	PEID, TemplateID   string
+	VendorMsgID        string // first part's vendor ID
+	Cost               string // vendor cost for the whole message
 }
 
 // Create stores a newly accepted message.
@@ -71,7 +76,8 @@ func (s *Store) Create(ctx context.Context, m *domain.Message) error {
 			"account", m.AccountID, "channel", string(m.Channel), "ref", m.ClientRef,
 			"src", m.Sender, "dst", m.Destination, "segs", m.Segments, "price", m.Price.String(),
 			"status", string(domain.StatusAccepted), "reg", reg,
-			"accepted", m.AcceptedAt.UnixMilli())
+			"accepted", m.AcceptedAt.UnixMilli(),
+			"mcc", m.MCC, "mnc", m.MNC, "pe", m.DLT.PEID, "tpl", m.DLT.TemplateID)
 		p.Expire(ctx, k, TTL)
 		return nil
 	})
@@ -106,15 +112,18 @@ func (s *Store) Get(ctx context.Context, id string) (State, error) {
 		Status: domain.MessageStatus(v["status"]), ErrorCode: v["err"], VendorID: v["vendor"],
 		Parts: atoi("parts"), PartsDone: atoi("parts_done"), PartsOK: atoi("parts_ok"),
 		RegisteredDelivery: v["reg"] == "1", AcceptedAt: ms("accepted"), DoneAt: ms("done"),
+		ReceiptSent: v["dlr_sent"] == "1",
+		MCC:         v["mcc"], MNC: v["mnc"], PEID: v["pe"], TemplateID: v["tpl"],
+		VendorMsgID: v["vmid"], Cost: v["cost"],
 	}, nil
 }
 
 // MapVendorIDs records which vendor message IDs belong to a message, and how
 // many parts it was sent as. It must run before the submitted status is
 // published so a fast DLR can always be matched.
-func (s *Store) MapVendorIDs(ctx context.Context, vendorID, msgID string, vmids []string) error {
+func (s *Store) MapVendorIDs(ctx context.Context, vendorID, msgID string, vmids []string, cost string) error {
 	_, err := s.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
-		p.HSet(ctx, msgKey(msgID), "vendor", vendorID, "parts", len(vmids))
+		p.HSet(ctx, msgKey(msgID), "vendor", vendorID, "parts", len(vmids), "vmid", vmids[0], "cost", cost)
 		for _, v := range vmids {
 			p.Set(ctx, vmidKey(vendorID, v), msgID, TTL)
 		}
@@ -203,10 +212,10 @@ func (s *Store) RecordPart(ctx context.Context, id, vmid string, delivered bool)
 	return PartResult{Counted: res[0] == 1, Parts: int(res[1]), PartsDone: int(res[2]), PartsOK: int(res[3])}, nil
 }
 
-// ClaimReceipt returns true exactly once per message, so the customer gets
-// one final receipt even when events are replayed.
-func (s *Store) ClaimReceipt(ctx context.Context, id string) (bool, error) {
-	return s.rdb.HSetNX(ctx, msgKey(id), "dlr_sent", 1).Result()
+// MarkReceiptSent records that the final receipt was queued. It is set after
+// queuing, so a crash in between can repeat a receipt but never lose one.
+func (s *Store) MarkReceiptSent(ctx context.Context, id string) error {
+	return s.rdb.HSet(ctx, msgKey(id), "dlr_sent", 1).Err()
 }
 
 func boolInt(b bool) int {

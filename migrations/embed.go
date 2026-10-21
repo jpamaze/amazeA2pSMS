@@ -7,3 +7,8 @@ import "embed"
 //
 //go:embed postgres/*.sql
 var Postgres embed.FS
+
+// ClickHouse holds clickhouse/*.sql (idempotent DDL), applied by ch-writer.
+//
+//go:embed clickhouse/*.sql
+var ClickHouse embed.FS

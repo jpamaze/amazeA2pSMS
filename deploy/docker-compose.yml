@@ -118,6 +118,40 @@ services:
       VENDOR_ID: sim
     ports: ["9107:9090"]
 
+  connector-httpsim:
+    <<: *service
+    build: { context: .., args: { SERVICE: connector } }
+    environment:
+      <<: *env
+      VENDOR_ID: httpsim
+      DLR_ADDR: ":8090"
+    ports: ["9108:9090", "8090:8090"]
+
+  webhook-dispatcher:
+    <<: *service
+    build: { context: .., args: { SERVICE: webhook-dispatcher } }
+    environment:
+      <<: *env
+      WEBHOOK_ALLOW_PRIVATE: "true"
+    ports: ["9109:9090"]
+
+  ch-writer:
+    <<: *service
+    build: { context: .., args: { SERVICE: ch-writer } }
+    depends_on:
+      redpanda: { condition: service_healthy }
+      clickhouse: { condition: service_started }
+    environment:
+      <<: *env
+      CLICKHOUSE_URL: http://clickhouse:8123
+    ports: ["9110:9090"]
+
+  # Fake HTTP vendor; calls back DLRs to connector-httpsim.
+  http-sim:
+    build: { context: .., args: { SERVICE: http-sim } }
+    command: ["-addr", ":2777", "-dlr-url", "http://connector-httpsim:8090/dlr/httpsim?token=devtoken"]
+    ports: ["2777:2777"]
+
   # Fake vendor SMSC that answers submits and sends delivery receipts.
   smpp-sim:
     build: { context: .., args: { SERVICE: smpp-sim } }
@@ -129,7 +163,7 @@ services:
   seed:
     <<: *service
     build: { context: .., args: { SERVICE: devseed } }
-    command: ["-sim-host", "smpp-sim", "-sim-port", "2776"]
+    command: ["-sim-host", "smpp-sim", "-sim-port", "2776", "-http-sim-url", "http://http-sim:2777"]
     depends_on:
       migrate: { condition: service_completed_successfully }
     restart: "no"

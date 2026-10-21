@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
@@ -21,24 +22,42 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/session"
 )
 
-// MaxAttempts is how often one part is tried on temporary errors.
+// MaxAttempts is how often one request is tried on temporary errors.
 const MaxAttempts = 5
+
+// Transport sends one message to the vendor over a protocol. It retries
+// temporary errors itself and returns the vendor message IDs it got (one per
+// part). On error, IDs of parts already accepted are still returned.
+type Transport interface {
+	Send(ctx context.Context, m *domain.Message) ([]string, error)
+	// Window is how many messages may be in flight at once.
+	Window() int
+}
+
+// SendError is a vendor refusal with a platform error code.
+type SendError struct {
+	Code      string
+	Temporary bool
+	Err       error
+}
+
+func (e *SendError) Error() string { return e.Code + ": " + e.Err.Error() }
+func (e *SendError) Unwrap() error { return e.Err }
 
 // Connector sends one vendor's routed messages.
 type Connector struct {
-	VendorID string
-	Pool     *Pool
-	TLVs     TLVProfile
-	Store    *msgstore.Store
-	Kafka    *kgo.Client
-	Log      *slog.Logger
+	VendorID  string
+	Transport Transport
+	Store     *msgstore.Store
+	Kafka     *kgo.Client
+	Log       *slog.Logger
 }
 
 // Process sends a batch of routed records concurrently and publishes one
 // status event per message. It returns only when every message has a final
 // outcome for this hop (submitted or failed), so offsets can be committed.
 func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
-	sem := make(chan struct{}, c.Pool.Window())
+	sem := make(chan struct{}, c.Transport.Window())
 	events := make([]*domain.StatusEvent, len(recs))
 	var wg sync.WaitGroup
 	for i, rec := range recs {
@@ -88,23 +107,21 @@ func (c *Connector) send(ctx context.Context, m *domain.Message) *domain.StatusE
 		ev.Status, ev.At = domain.StatusSubmitted, time.Now().UTC()
 		return ev
 	}
-	parts := c.build(m)
-	var vmids []string
-	for _, sm := range parts {
-		id, err := c.submitWithRetry(ctx, sm)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			ev.Status, ev.ErrorCode, ev.At = domain.StatusFailed, errorCode(err), time.Now().UTC()
-			c.Log.Info("vendor refused message", "message", m.ID, "err", err)
-			break
+	vmids, err := c.Transport.Send(ctx, m)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
 		}
-		vmids = append(vmids, id)
+		ev.Status, ev.ErrorCode, ev.At = domain.StatusFailed, errorCode(err), time.Now().UTC()
+		c.Log.Info("vendor refused message", "message", m.ID, "err", err)
 	}
 	if len(vmids) > 0 {
 		// Mapping first, so a fast DLR always finds its message.
-		if err := c.Store.MapVendorIDs(ctx, c.VendorID, m.ID, vmids); err != nil {
+		cost := ""
+		if m.Route != nil {
+			cost = m.Route.Cost.Mul(decimal.NewFromInt(int64(m.Segments))).String()
+		}
+		if err := c.Store.MapVendorIDs(ctx, c.VendorID, m.ID, vmids, cost); err != nil {
 			c.Log.Error("vendor ID mapping failed; DLRs for this message will be unmatched",
 				"message", m.ID, "err", err)
 		}
@@ -116,20 +133,18 @@ func (c *Connector) send(ctx context.Context, m *domain.Message) *domain.StatusE
 	return ev
 }
 
-func (c *Connector) submitWithRetry(ctx context.Context, sm *pdu.SM) (string, error) {
+// withRetry runs try up to MaxAttempts times while isTemp says the error is
+// temporary, backing off with jitter.
+func withRetry(ctx context.Context, isTemp func(error) bool, try func() (string, error)) (string, error) {
 	backoff := 200 * time.Millisecond
 	var last error
 	for attempt := 1; attempt <= MaxAttempts; attempt++ {
-		b, err := c.Pool.Pick(ctx)
-		if err != nil {
-			return "", err
-		}
-		id, err := b.Submit(ctx, sm)
+		id, err := try()
 		if err == nil {
 			return id, nil
 		}
 		last = err
-		if !temporary(err) || ctx.Err() != nil {
+		if !isTemp(err) || ctx.Err() != nil {
 			return "", err
 		}
 		select {
@@ -140,6 +155,34 @@ func (c *Connector) submitWithRetry(ctx context.Context, sm *pdu.SM) (string, er
 		backoff = min(backoff*2, 5*time.Second)
 	}
 	return "", last
+}
+
+// SMPPTransport sends over a pool of SMPP binds.
+type SMPPTransport struct {
+	Pool *Pool
+	TLVs TLVProfile
+}
+
+// Window implements Transport.
+func (t *SMPPTransport) Window() int { return t.Pool.Window() }
+
+// Send implements Transport: one submit_sm per part.
+func (t *SMPPTransport) Send(ctx context.Context, m *domain.Message) ([]string, error) {
+	var vmids []string
+	for _, sm := range t.build(m) {
+		id, err := withRetry(ctx, temporary, func() (string, error) {
+			b, err := t.Pool.Pick(ctx)
+			if err != nil {
+				return "", err
+			}
+			return b.Submit(ctx, sm)
+		})
+		if err != nil {
+			return vmids, err
+		}
+		vmids = append(vmids, id)
+	}
+	return vmids, nil
 }
 
 // temporary reports whether a submit error is worth retrying. A timeout is
@@ -162,11 +205,15 @@ func errorCode(err error) string {
 	if errors.As(err, &se) {
 		return fmt.Sprintf("SMPP_%08X", se.Status)
 	}
+	var send *SendError
+	if errors.As(err, &send) {
+		return send.Code
+	}
 	return "VENDOR_UNREACHABLE"
 }
 
 // build turns a message into one submit_sm per part.
-func (c *Connector) build(m *domain.Message) []*pdu.SM {
+func (t *SMPPTransport) build(m *domain.Message) []*pdu.SM {
 	base := pdu.SM{
 		Dest: m.Destination, DestTON: 1, DestNPI: 1,
 		Source: m.Sender, RegisteredDelivery: 1,
@@ -176,7 +223,7 @@ func (c *Connector) build(m *domain.Message) []*pdu.SM {
 	} else {
 		base.SourceTON, base.SourceNPI = 5, 0
 	}
-	c.addDLT(&base, m.DLT)
+	t.addDLT(&base, m.DLT)
 
 	if len(m.UDH) > 0 {
 		sm := base
@@ -219,15 +266,15 @@ func encodeWhole(text string) (byte, []byte) {
 	return 0x08, gsm7.EncodeUCS2(text)
 }
 
-func (c *Connector) addDLT(sm *pdu.SM, f domain.DLTFields) {
+func (t *SMPPTransport) addDLT(sm *pdu.SM, f domain.DLTFields) {
 	set := func(tag uint16, v string) {
 		if tag != 0 && v != "" {
 			sm.TLVs.SetString(tag, v)
 		}
 	}
-	set(c.TLVs.PEID, f.PEID)
-	set(c.TLVs.TemplateID, f.TemplateID)
-	set(c.TLVs.TMChain, f.TMChain)
+	set(t.TLVs.PEID, f.PEID)
+	set(t.TLVs.TemplateID, f.TemplateID)
+	set(t.TLVs.TMChain, f.TMChain)
 }
 
 // Deliver journals a vendor deliver_sm to Kafka before it is acknowledged
@@ -263,4 +310,15 @@ func (c *Connector) Deliver(ctx context.Context, sm *pdu.SM) uint32 {
 		return pdu.StatusSysErr
 	}
 	return pdu.StatusOK
+}
+
+// JournalDLR writes a vendor receipt to Kafka. The caller acknowledges the
+// vendor only when it returns nil.
+func (c *Connector) JournalDLR(ctx context.Context, d domain.DLR) error {
+	d.VendorID = c.VendorID
+	rec, err := kafka.Record(kafka.TopicDLR, c.VendorID+":"+d.VendorMsgID, d)
+	if err != nil {
+		return err
+	}
+	return kafka.ProduceJSON(ctx, c.Kafka, rec)
 }

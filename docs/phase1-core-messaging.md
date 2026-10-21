@@ -1,4 +1,6 @@
-# Phase 1: Core messaging, slice 1
+# Phase 1: Core messaging
+
+## Slice 1
 
 Slice 1 is a working path end to end: a customer submits over SMPP or HTTP, the message goes to a vendor over SMPP, and the delivery receipt comes back to the customer, with the balance held and charged correctly.
 
@@ -36,15 +38,40 @@ All of these ran on one 4-vCPU, 15 GB container, with the in-memory Kafka, Redis
 
 Customer SMPP error codes: 0x58 throttled, 0x0B invalid destination, 0x0A invalid sender, 0x01 empty or too long, 0x104 unsupported data_coding, 0x14 temporarily unavailable (retry), **0x401 insufficient balance**, **0x402 no rate for destination** (0x400–0x4FF are vendor-specific per the SMPP spec).
 
+## Slice 2
+
+Slice 2 adds HTTP vendors, customer webhooks, message history in ClickHouse, onboarding through the admin API, and bind limits that hold across nodes.
+
+| Area | What works | Code |
+| --- | --- | --- |
+| HTTP vendor connector | Any HTTP vendor described by config (`http_vendor_profiles`): JSON, form or query requests with placeholders, bearer, basic, header or query auth with an encrypted secret, JSON-path or regex response parsing, retries on 429/5xx/timeouts, per-vendor TPS and concurrency | `internal/connector/httpvendor.go` |
+| HTTP vendor DLRs | Vendors call `/dlr/<vendor>?token=<dlr_token>` (GET, form or JSON). The receipt is journaled to Kafka before the 200; intermediate statuses are ignored | `connector.DLRHandler` |
+| Customer webhooks | One `message.status` event per message to the account's webhook URL, signed `X-Amaze-Signature: t=<unix>,v1=<HMAC-SHA256 of "t.body">`. Retries at 30 s, 5 min, 30 min and 2 h, each tier on its own topic, then `sms.webhooks.dead`. Private and loopback targets are refused outside dev; redirects are not followed | `internal/webhook`, `cmd/webhook-dispatcher` |
+| ClickHouse history | Row on accept (`sms.submit`) and on final status (`sms.records`), batched inserts over the HTTP interface into the ReplacingMergeTree; schema applied at start-up | `internal/records`, `cmd/ch-writer` |
+| Admin onboarding | `POST /v1/accounts` (a rate card is required when the parent has none), `POST /v1/accounts/{id}/topups` (Idempotency-Key; loads the wallet into Redis), `GET /v1/accounts/{id}/wallet`, `PUT …/credit-limit`, `POST …/smpp-credentials`, `POST …/api-keys`, `PUT …/webhook`, `PUT …/rate-card`, `GET /v1/rate-cards` | `internal/edge/adminapi` |
+| Wallet loading | A top-up or credit-limit change on a wallet missing from Redis loads it from PostgreSQL; otherwise only the delta is applied | `wallet.ApplyTopUp`, `wallet.ApplyCreditLimit` |
+| Bind limits across nodes | Max binds per system_id are held as 90 s leases in Redis, refreshed by each node; a crashed node's slots free up after one lease | `msgstore/binds.go` |
+| Receipts after a crash | The final receipt (deliver_sm or webhook) and the ClickHouse row are queued before the message is marked notified, and re-checked on every replay: a crash can repeat a receipt but no longer lose one | `dlr.Processor.notify` |
+| Dev tools | `http-sim` (HTTP vendor), `scripts/ch-dev-server.py` (ClickHouse HTTP stand-in on chdb), `ROUTE=httpsim` and `CHDB_PYTHON=` in `dev-local.sh` | |
+
+### Slice 2 test results (same 4-vCPU box, now running 10 services plus ClickHouse)
+
+| Test | Result |
+| --- | --- |
+| SMPP vendor, 2,000 TPS for 20 s, ClickHouse writer on | 39,922 accepted, 0 failed, every receipt back; ClickHouse holds 39,922 final rows; revenue ₹4,790.64 and cost ₹1,996.10 match count × price |
+| HTTP vendor, 1,000 TPS for 20 s | 20,003 accepted, 0 failed, every receipt back through the HTTP callback; vendor error codes carried (`UNDELIV:34`) |
+| Onboarding by API only | Account, ₹50 top-up (a repeat with the same key gets 409), API key, SMPP credential and webhook created; the wallet is spendable at once |
+| Webhooks | 200 messages, 200 events, every signature valid; 14 first attempts refused by the receiver were delivered on the 30 s retry |
+| Bind limit across nodes | With max_binds 2, two binds on node A made node B refuse a third (0x0D); after they closed, node B bound two |
+
 ## Not in this slice
 
 | Item | Plan |
 | --- | --- |
-| HTTP vendor connector | Next slice: `http_vendor_profiles` request and response mapping, the same retry and journal rules |
-| HTTP customer webhooks | Next slice: signed callbacks with retries |
-| ClickHouse writer | Next slice: status and DLR events to `message_records` |
-| Wallet loading for new accounts and top-ups | Next slice: admin-api top-up endpoint writes the ledger and syncs Redis (today only `devseed` loads wallets) |
-| Max binds across nodes | Per node now; move to Redis |
+| Admin authentication | Keycloak OIDC; the admin API serves only with APP_ENV=dev until then |
+| Reseller wallet transfers | Resellers moving their own balance to sub-accounts (today only the platform books top-ups) |
+| Per-message webhook URL | Account-level webhook only |
+| MO delivery to customers | MO messages are journaled to `sms.mo`; routing them to customers comes with hubbing (phase 3) |
 | Vendor failover to another vendor | The connector waits while its vendor is down; the router will route around unhealthy vendors (phase 3) |
 | DLT template matching, firewall, HLR/MNP | Phase 3 (fields are already carried end to end) |
 | Load-test gate on production-shaped hardware | Run `smpp-load` against separate nodes with real Kafka (3 brokers) |
