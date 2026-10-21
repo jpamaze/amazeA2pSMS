@@ -78,14 +78,24 @@ up)
   "$B/devseed" -route "${ROUTE:-sim}" ${SEED_ARGS:-} | tee "$L/seed.log"
   start smpp-server   OPS_ADDR=:9101 "$B/smpp-server"
   start http-api      OPS_ADDR=:9102 "$B/http-api"
-  start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="${CHDB_PYTHON:+http://localhost:8123}" "$B/admin-api"
+  if [ -n "${PROMETHEUS_BIN:-}" ]; then
+    mkdir -p "$ROOT/.dev/prom"
+    printf 'global: {scrape_interval: 5s}\nscrape_configs:\n  - job_name: platform\n    static_configs: [{targets: [%s]}]\n' \
+      "$(printf '"localhost:%s",' 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110 | sed 's/,$//')" > "$ROOT/.dev/prom/prometheus.yml"
+    start prometheus "$PROMETHEUS_BIN" --config.file="$ROOT/.dev/prom/prometheus.yml" --storage.tsdb.path="$ROOT/.dev/prom/data" \
+      --web.listen-address=:9090 --log.level=warn
+  fi
+  [ -d "$ROOT/portal/out" ] || echo "portal not built (cd portal && npm ci && npm run build); admin-api serves the API only"
+  start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="${CHDB_PYTHON:+http://localhost:8123}" \
+    PORTAL_DIR="$( [ -d "$ROOT/portal/out" ] && echo "$ROOT/portal/out")" PROMETHEUS_URL="${PROMETHEUS_BIN:+http://localhost:9090}" "$B/admin-api"
+  start alerter       OPS_ADDR=:9111 ALERT_EVERY=10s "$B/alerter"
   start router        OPS_ADDR=:9104 "$B/router"
   start rater         OPS_ADDR=:9105 "$B/rater"
   start dlr-processor OPS_ADDR=:9106 DLR_TIMEOUT="${DLR_TIMEOUT:-72h}" "$B/dlr-processor"
   start connector-sim OPS_ADDR=:9107 VENDOR_ID=sim "$B/connector"
   start connector-httpsim OPS_ADDR=:9108 VENDOR_ID=httpsim DLR_ADDR=:8090 "$B/connector"
   start webhook-dispatcher OPS_ADDR=:9109 WEBHOOK_ALLOW_PRIVATE=true "$B/webhook-dispatcher"
-  ports="9101 9102 9103 9104 9105 9106 9107 9108 9109"
+  ports="9101 9102 9103 9104 9105 9106 9107 9108 9109 9111"
   if [ -n "${CHDB_PYTHON:-}" ]; then
     start ch-writer OPS_ADDR=:9110 "$B/ch-writer"
     ports="$ports 9110"

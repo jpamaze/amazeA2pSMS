@@ -43,8 +43,13 @@ services:
     <<: *svc
     profiles: [admin]
     image: ${REGISTRY}/admin-api:${TAG}
-    build: { <<: *build, args: { SERVICE: admin-api } }
-    environment: { <<: *env, OPS_ADDR: ":9103", OIDC_ISSUER: "${OIDC_ISSUER:-}" }
+    build: { <<: *build, target: admin-api, args: { SERVICE: admin-api } }
+    environment:
+      <<: *env
+      OPS_ADDR: ":9103"
+      OIDC_ISSUER: "${OIDC_ISSUER:-}"
+      PORTAL_OIDC_ISSUER: "${PORTAL_OIDC_ISSUER:-}"
+      PROMETHEUS_URL: "http://${MON_1}:9090"
   router:
     <<: *svc
     image: ${REGISTRY}/router:${TAG}
@@ -81,6 +86,22 @@ services:
     <<: *svc
     image: ${REGISTRY}/connector:${TAG}
     environment: { <<: *env, OPS_ADDR: ":9108", VENDOR_ID: httpsim, DLR_ADDR: ":8090" }
+  alerter:
+    <<: *svc
+    image: ${REGISTRY}/alerter:${TAG}
+    build: { <<: *build, args: { SERVICE: alerter } }
+    environment:
+      <<: *env
+      OPS_ADDR: ":9111"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      SMTP_TLS: "${SMTP_TLS:-starttls}"
+      ALERT_SMS_URL: "${ALERT_SMS_URL:-}"
+      ALERT_SMS_API_KEY: "${ALERT_SMS_API_KEY:-}"
+      ALERT_SMS_SENDER: "${ALERT_SMS_SENDER:-}"
   webhook-dispatcher:
     <<: *svc
     image: ${REGISTRY}/webhook-dispatcher:${TAG}

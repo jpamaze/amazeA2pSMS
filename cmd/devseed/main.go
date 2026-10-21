@@ -162,6 +162,47 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 			ON CONFLICT ((lower(email))) DO NOTHING`, platformID); err != nil {
 			return err
 		}
+		// Portal demo: the customer's own user, and a reseller with its own
+		// rate card, brand, user and one sub-account.
+		if _, err := tx.Exec(ctx, `INSERT INTO users (account_id, email, role) VALUES ($1, 'owner@demo-customer.local', 'owner')
+			ON CONFLICT ((lower(email))) DO NOTHING`, customerID); err != nil {
+			return err
+		}
+		resellerID, err := one(`SELECT id FROM accounts WHERE name = 'Demo Reseller'`)
+		if err != nil {
+			return err
+		}
+		if resellerID == "" {
+			if resellerID, err = one(`INSERT INTO accounts (parent_id, role, name, rate_card_id) VALUES ($1, 'reseller', 'Demo Reseller', $2) RETURNING id`,
+				platformID, rateCard); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE wallets SET balance = 5000 WHERE account_id = $1`, resellerID); err != nil {
+				return err
+			}
+			card, err := one(`INSERT INTO rate_cards (name, owner_account_id) VALUES ('Reseller retail', $1) RETURNING id`, resellerID)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO rate_card_entries (rate_card_id, mcc, mnc, price, valid_from) VALUES ($1, '404', '*', 0.18, '2020-01-01')`, card); err != nil {
+				return err
+			}
+			shop, err := one(`INSERT INTO accounts (parent_id, role, name, rate_card_id) VALUES ($1, 'customer', 'Reseller Shop', $2) RETURNING id`, resellerID, card)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE wallets SET balance = 500 WHERE account_id = $1`, shop); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO users (account_id, email, role) VALUES ($1, 'owner@demo-reseller.local', 'owner'), ($2, 'owner@reseller-shop.local', 'owner')
+				ON CONFLICT ((lower(email))) DO NOTHING`, resellerID, shop); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO branding (account_id, display_name, primary_color, support_email, updated_by)
+				VALUES ($1, 'BlueText SMS', '#0e7c66', 'help@bluetext.example', 'devseed')`, resellerID); err != nil {
+				return err
+			}
+		}
 
 		hash, err := auth.HashPassword("demo123")
 		if err != nil {
@@ -259,12 +300,26 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 		return err
 	}
 
-	// Load the customer's wallet into Redis from the system of record.
+	// Load every seeded wallet into Redis from the system of record.
 	var bal, limit decimal.Decimal
-	if err := pool.QueryRow(ctx, `SELECT balance, credit_limit FROM wallets WHERE account_id = $1`, customerID).Scan(&bal, &limit); err != nil {
+	rows, err := pool.Query(ctx, `SELECT account_id, balance, credit_limit FROM wallets`)
+	if err != nil {
 		return err
 	}
-	if err := wallet.New(rdb).Sync(ctx, customerID, wallet.FromDecimal(bal), wallet.FromDecimal(limit)); err != nil {
+	for rows.Next() {
+		var acct string
+		var b, l decimal.Decimal
+		if err := rows.Scan(&acct, &b, &l); err != nil {
+			return err
+		}
+		if err := wallet.New(rdb).Sync(ctx, acct, wallet.FromDecimal(b), wallet.FromDecimal(l)); err != nil {
+			return err
+		}
+		if acct == customerID {
+			bal, limit = b, l
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 

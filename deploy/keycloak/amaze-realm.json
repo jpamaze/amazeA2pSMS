@@ -14,17 +14,47 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
-      "redirectUris": ["http://localhost:3000/*"],
-      "webOrigins": ["http://localhost:3000"],
-      "attributes": { "pkce.code.challenge.method": "S256" },
+      "redirectUris": [
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "audience amaze-admin",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
-          "config": { "included.client.audience": "amaze-admin", "access.token.claim": "true", "id.token.claim": "false" }
+          "config": {
+            "included.client.audience": "amaze-admin",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
         }
       ]
+    },
+    {
+      "clientId": "amaze-portal",
+      "name": "Customer, reseller and admin portal",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:8081/callback/"
+      ],
+      "webOrigins": [
+        "http://localhost:8081"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8081/login/"
+      },
+      "protocol": "openid-connect"
     }
   ],
   "users": [
@@ -35,7 +65,13 @@
       "enabled": true,
       "firstName": "Platform",
       "lastName": "Owner",
-      "credentials": [{ "type": "password", "value": "dev-only-change-me", "temporary": false }]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-only-change-me",
+          "temporary": false
+        }
+      ]
     }
   ]
 }

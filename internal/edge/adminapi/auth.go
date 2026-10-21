@@ -23,6 +23,8 @@ const (
 	PermAdmin                     // admin, owner: everything
 )
 
+var permName = map[Permission]string{PermRead: "read", PermFinance: "finance", PermAdmin: "admin"}
+
 // rolePerm maps users.role to the highest permission it holds.
 var rolePerm = map[string]Permission{
 	"viewer": PermRead, "support": PermRead, "finance": PermFinance, "admin": PermAdmin, "owner": PermAdmin,
@@ -63,11 +65,11 @@ func (d DevHeaders) Resolve(r *http.Request) (actor, error) {
 type OIDC struct {
 	PG       *pgxpool.Pool
 	Verifier *oidc.IDTokenVerifier
-	Audience string // accepted in aud or azp; empty skips the check
+	Audience []string // client IDs accepted in aud or azp; empty skips the check
 }
 
-// NewOIDC discovers the issuer's keys. audience is the client ID the tokens
-// must be issued for (Keycloak puts it in azp, or in aud with an audience
+// NewOIDC discovers the issuer's keys. audience lists the client IDs
+// (comma-separated: the admin tools and the portal) tokens must be issued for (Keycloak puts it in azp, or in aud with an audience
 // mapper). discoveryURL, when set, is where to fetch discovery from if it
 // differs from the issuer (e.g. Keycloak reached by its Docker service name).
 func NewOIDC(ctx context.Context, pg *pgxpool.Pool, issuer, audience string, discoveryURL ...string) (*OIDC, error) {
@@ -83,7 +85,7 @@ func NewOIDC(ctx context.Context, pg *pgxpool.Pool, issuer, audience string, dis
 	return &OIDC{
 		PG:       pg,
 		Verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
-		Audience: audience,
+		Audience: splitList(audience),
 	}, nil
 }
 
@@ -129,7 +131,9 @@ func (o *OIDC) Resolve(r *http.Request) (actor, error) {
 	if err := tok.Claims(&c); err != nil {
 		return actor{}, errUnauthenticated
 	}
-	if o.Audience != "" && c.AuthorizedBy != o.Audience && !slices.Contains(c.Audience, o.Audience) {
+	if len(o.Audience) > 0 && !slices.ContainsFunc(o.Audience, func(a string) bool {
+		return c.AuthorizedBy == a || slices.Contains(c.Audience, a)
+	}) {
 		return actor{}, errUnauthenticated
 	}
 	if c.Email == "" || (c.EmailVerified != nil && !*c.EmailVerified) {
@@ -154,3 +158,13 @@ func (o *OIDC) Resolve(r *http.Request) (actor, error) {
 }
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -24,8 +25,9 @@ type adminConfig struct {
 	SecretsKey string `env:"SECRETS_KEY"`
 	// Keycloak realm URL, e.g. https://sso.example.com/realms/amaze. Required
 	// outside APP_ENV=dev; in dev, leaving it empty enables header sign-in.
-	OIDCIssuer   string `env:"OIDC_ISSUER"`
-	OIDCAudience string `env:"OIDC_AUDIENCE" envDefault:"amaze-admin"`
+	OIDCIssuer string `env:"OIDC_ISSUER"`
+	// Client IDs whose tokens are accepted: the admin tools and the portal.
+	OIDCAudience string `env:"OIDC_AUDIENCE" envDefault:"amaze-admin,amaze-portal"`
 	// Optional: fetch discovery here when it differs from the issuer URL.
 	OIDCDiscovery string `env:"OIDC_DISCOVERY_URL"`
 	// Optional: usage reports read ClickHouse.
@@ -33,6 +35,14 @@ type adminConfig struct {
 	CHDB       string `env:"CLICKHOUSE_DB" envDefault:"sms"`
 	CHUser     string `env:"CLICKHOUSE_USER" envDefault:"sms"`
 	CHPassword string `env:"CLICKHOUSE_PASSWORD" envDefault:"sms"`
+	// Portal: the static export to serve (portal/out), and the public OIDC
+	// client the browser signs in with (PKCE). The issuer defaults to
+	// OIDC_ISSUER; set it when browsers reach Keycloak at another URL.
+	PortalDir      string `env:"PORTAL_DIR"`
+	PortalIssuer   string `env:"PORTAL_OIDC_ISSUER"`
+	PortalClientID string `env:"PORTAL_OIDC_CLIENT_ID" envDefault:"amaze-portal"`
+	// Live monitoring reads Prometheus.
+	PromURL string `env:"PROMETHEUS_URL"`
 }
 
 func main() {
@@ -76,14 +86,23 @@ func main() {
 			Ledger:   &ledger.Service{PG: d.PG, Wallets: wallets},
 			Resolver: resolver,
 			Redis:    d.Redis,
+			PromURL:  ac.PromURL,
+		}
+		if ac.OIDCIssuer != "" {
+			api.Portal = adminapi.PortalConfig{OIDCIssuer: cmp.Or(ac.PortalIssuer, ac.OIDCIssuer), OIDCClientID: ac.PortalClientID}
 		}
 		if ac.CHURL != "" {
 			api.CH = &records.ClickHouse{URL: ac.CHURL, Database: ac.CHDB, User: ac.CHUser, Password: ac.CHPassword}
 		}
+		var handler http.Handler = api.Handler()
+		if ac.PortalDir != "" {
+			handler = adminapi.PortalHandler(ac.PortalDir, handler)
+			d.Log.Info("serving the portal", "dir", ac.PortalDir)
+		}
 		d.Log.Info("admin api listening", "addr", ac.Addr)
 		return service.ServeHTTP(ctx, &http.Server{
 			Addr:              ac.Addr,
-			Handler:           api.Handler(),
+			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 		})
 	})

@@ -17,6 +17,7 @@ scrape_configs:
       - { source_labels: [__address__], regex: '.*:9108', target_label: service, replacement: connector-httpsim }
       - { source_labels: [__address__], regex: '.*:9109', target_label: service, replacement: webhook-dispatcher }
       - { source_labels: [__address__], regex: '.*:9110', target_label: service, replacement: ch-writer }
+      - { source_labels: [__address__], regex: '.*:9111', target_label: service, replacement: alerter }
   - job_name: redpanda
     metrics_path: /public_metrics
     static_configs:

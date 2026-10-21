@@ -44,7 +44,7 @@ case "${1:-}" in
 render-monitoring)
   join() { local port=$1; shift; local out=""; for h in "$@"; do out+="'$h:$port', "; done; echo "${out%, }"; }
   app=""
-  for p in 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110; do app+="$(join $p "$APP_1" "$APP_2"), "; done
+  for p in 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110 9111; do app+="$(join $p "$APP_1" "$APP_2"), "; done
   sed -e "s|__APP_TARGETS__|${app%, }|" \
       -e "s|__KAFKA_TARGETS__|$(join 9644 "$KAFKA_1" "$KAFKA_2" "$KAFKA_3")|" \
       -e "s|__NODE_TARGETS__|$(join 9100 "$KAFKA_1" "$KAFKA_2" "$KAFKA_3" "$DATA_1" "$CH_1" "$APP_1" "$APP_2" "$SIM_1")|" \

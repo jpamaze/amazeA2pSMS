@@ -92,7 +92,7 @@ services:
 
   admin-api:
     <<: *service
-    build: { context: .., args: { SERVICE: admin-api } }
+    build: { context: .., target: admin-api, args: { SERVICE: admin-api } }
     ports: ["8081:8081", "9103:9090"]
     environment:
       <<: *env
@@ -144,6 +144,22 @@ services:
       VENDOR_ID: httpsim
       DLR_ADDR: ":8090"
     ports: ["9108:9090", "8090:8090"]
+
+  alerter:
+    <<: *service
+    build: { context: .., args: { SERVICE: alerter } }
+    environment:
+      <<: *env
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_TLS: none
+      SMTP_FROM: alerts@amaze.local
+    ports: ["9111:9090"]
+
+  # Dev mail catcher for alert e-mails: open http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:v1.20.5
+    ports: ["8025:8025"]
 
   webhook-dispatcher:
     <<: *service

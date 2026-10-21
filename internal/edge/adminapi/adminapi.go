@@ -42,6 +42,8 @@ type API struct {
 	Resolver Resolver
 	CH       *records.ClickHouse   // usage reports; optional
 	Redis    redis.UniversalClient // live deal counters; optional
+	Portal   PortalConfig          // browser sign-in settings
+	PromURL  string                // Prometheus for live monitoring; optional
 }
 
 type actor struct {
@@ -70,6 +72,8 @@ func (a *API) Handler() http.Handler {
 	a.commercialRoutes(mux)
 	a.dltRoutes(mux)
 	a.networkRoutes(mux)
+	a.portalRoutes(mux)
+	a.portalDataRoutes(mux)
 	return mux
 }
 
@@ -125,9 +129,12 @@ func (a *API) audit(r *http.Request, act actor, status int) {
 	}
 }
 
-func (a *API) me(w http.ResponseWriter, _ *http.Request, act actor) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"email": act.User, "account_id": act.AccountID, "account_role": act.Role, "user_role": act.UserRole,
+func (a *API) me(w http.ResponseWriter, r *http.Request, act actor) {
+	var name string
+	_ = a.PG.QueryRow(r.Context(), `SELECT name FROM accounts WHERE id = $1`, act.AccountID).Scan(&name)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"email": act.User, "account_id": act.AccountID, "account_name": name, "account_role": act.Role,
+		"user_role": act.UserRole, "permission": permName[act.Perm], "brand": a.brandForAccount(r.Context(), act.AccountID),
 	})
 }
 
@@ -262,7 +269,7 @@ func (a *API) createAccount(w http.ResponseWriter, r *http.Request, act actor) {
 }
 
 func (a *API) getWallet(w http.ResponseWriter, r *http.Request, act actor) {
-	id, ok := a.managed(w, r, act)
+	id, ok := a.managedOrSelf(w, r, act)
 	if !ok {
 		return
 	}
@@ -405,7 +412,7 @@ func (a *API) createSMPPCredential(w http.ResponseWriter, r *http.Request, act a
 }
 
 func (a *API) createAPIKey(w http.ResponseWriter, r *http.Request, act actor) {
-	id, ok := a.managed(w, r, act)
+	id, ok := a.managedOrSelf(w, r, act)
 	if !ok {
 		return
 	}
@@ -434,7 +441,7 @@ func (a *API) createAPIKey(w http.ResponseWriter, r *http.Request, act actor) {
 // setWebhook sets the account's delivery-status webhook and returns a new
 // signing secret (shown once).
 func (a *API) setWebhook(w http.ResponseWriter, r *http.Request, act actor) {
-	id, ok := a.managed(w, r, act)
+	id, ok := a.managedOrSelf(w, r, act)
 	if !ok {
 		return
 	}

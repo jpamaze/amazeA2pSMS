@@ -40,12 +40,28 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: go build ./cmd/...
 
-  images:
+  portal:
     runs-on: ubuntu-latest
-    needs: test
-    strategy:
-      matrix:
-        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, migrate, smpp-sim, http-sim, devseed]
+    defaults:
+      run:
+        working-directory: portal
     steps:
       - uses: actions/checkout@v4
-      - run: docker build --build-arg SERVICE=${{ matrix.service }} -t amaze-sms/${{ matrix.service }}:${{ github.sha }} .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+
+  images:
+    runs-on: ubuntu-latest
+    needs: [test, portal]
+    strategy:
+      matrix:
+        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, alerter, migrate, smpp-sim, http-sim, devseed]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build ${{ matrix.service == 'admin-api' && '--target admin-api' || '' }} --build-arg SERVICE=${{ matrix.service }} -t amaze-sms/${{ matrix.service }}:${{ github.sha }} .

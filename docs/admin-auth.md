@@ -40,3 +40,11 @@ TOKEN=$(curl -s -d grant_type=password -d client_id=amaze-admin \
   http://localhost:8180/realms/amaze/protocol/openid-connect/token | jq -r .access_token)
 curl -s localhost:8081/v1/me -H "Authorization: Bearer $TOKEN"
 ```
+
+## Portal sign-in
+
+The portal (phase 4) signs in with the public client `amaze-portal` (authorization code with PKCE); admin-api accepts tokens issued to `amaze-admin` or `amaze-portal` (`OIDC_AUDIENCE`).
+- Add every portal origin to the client: `https://<domain>/callback/` as a redirect URI and `https://<domain>/login/` as a post-logout redirect URI, reseller white-label domains included.
+- Wildcards are not used, so a code cannot be sent to another site.
+- `PORTAL_OIDC_ISSUER` sets the realm URL browsers use, when it differs from `OIDC_ISSUER`.
+

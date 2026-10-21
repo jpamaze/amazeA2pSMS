@@ -1,0 +1,7 @@
+.git
+.dev
+bin
+portal/node_modules
+portal/.next
+portal/out
+deploy/vm/reports

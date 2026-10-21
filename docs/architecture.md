@@ -25,7 +25,8 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 | --- | --- | --- | --- |
 | smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices, DLT registrations) |
 | http-api | REST | `sms.submit` | Redis, PG |
-| admin-api | REST | — | PG, Redis, ClickHouse (usage reports) |
+| admin-api | REST; serves the portal (static export) | — | PG, Redis, ClickHouse (reports, message search), Prometheus (live monitor) |
+| alerter | — (polls every 30 s) | e-mail (SMTP), SMS (through http-api), webhooks | PG (alert settings and events), Redis (wallets) |
 | router | `sms.submit`, `sms.reroute` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, costs and vendor deals, refreshed from PG; Redis (vendor deal progress, failover verdicts, HLR cache); HLR provider |
 | connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo`, `sms.reroute` (failover) | Redis (vendor msg ID map), PG (binds) |
 | dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis; PG (vendor error codes, reloaded every minute) |
