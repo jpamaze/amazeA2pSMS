@@ -36,7 +36,7 @@ All of these ran on one 4-vCPU, 15 GB container, with the in-memory Kafka, Redis
 | Billing after a crash | Ledger total = messages × price exactly; Redis and PostgreSQL balances equal; no holds left open |
 | Balance / credit | Rs 1 wallet at Rs 0.12: 8 accepted, then 0x401; after a Rs 1 credit limit, 8 more accepted |
 
-Customer SMPP error codes: 0x58 throttled, 0x0B invalid destination, 0x0A invalid sender, 0x01 empty or too long, 0x104 unsupported data_coding, 0x14 temporarily unavailable (retry), **0x401 insufficient balance**, **0x402 no rate for destination**, **0x403 account or reseller suspended**, **0x404 reseller billing** (reseller wallet short or no reseller rate; phase 2), **0x410–0x41F DLT refusals** (phase 3, see `docs/phase3-dlt.md`) (0x400–0x4FF are vendor-specific per the SMPP spec).
+Customer SMPP error codes: 0x58 throttled, 0x0B invalid destination, 0x0A invalid sender, 0x01 empty or too long, 0x104 unsupported data_coding, 0x14 temporarily unavailable (retry), **0x401 insufficient balance**, **0x402 no rate for destination**, **0x403 account or reseller suspended**, **0x404 reseller billing** (reseller wallet short or no reseller rate; phase 2), **0x410–0x41F DLT refusals** (phase 3, see `docs/phase3-dlt.md`), **0x420–0x425 firewall refusals** (`docs/phase3-network.md`) (0x400–0x4FF are vendor-specific per the SMPP spec).
 
 ## Slice 2
 

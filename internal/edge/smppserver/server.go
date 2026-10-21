@@ -20,6 +20,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
+	"github.com/jpamaze/amazeA2pSMS/internal/firewall"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/gsm7"
@@ -376,6 +377,9 @@ func statusFor(err error) uint32 {
 		return pdu.StatusMsgQFul // temporary: the customer should retry
 	}
 	if e, ok := dlt.AsError(err); ok {
+		return e.SMPPStatus()
+	}
+	if e, ok := firewall.AsError(err); ok {
 		return e.SMPPStatus()
 	}
 	return pdu.StatusSysErr

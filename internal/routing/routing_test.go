@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
@@ -100,5 +102,39 @@ func TestVendorDeals(t *testing.T) {
 	}
 	if got, _ := tbl.Choose("x", "404", "10"); got.VendorID != "dealonly" || !got.Cost.Equal(d("0.04")) {
 		t.Fatalf("vendor priced only by a deal: %+v", got)
+	}
+}
+
+func TestFailover(t *testing.T) {
+	active := map[string]bool{"a": true, "b": true, "c": true}
+	costs := map[string]map[string]decimal.Decimal{"a": {"404|*": d("0.01")}, "b": {"404|*": d("0.02")}, "c": {"404|*": d("0.03")}}
+	h := &Health{}
+	tbl := NewTable([]Rule{
+		{MCC: "404", MNC: "*", Mode: "lcr", Priority: 1},
+		{AccountID: "vip", MCC: "404", MNC: "*", Mode: "priority", VendorID: "a", Priority: 1},
+		{AccountID: "vip", MCC: "404", MNC: "*", Mode: "priority", VendorID: "c", Priority: 2},
+	}, active, costs).WithHealth(h)
+
+	h.Set(map[string]vendorhealth.State{"a": {Up: false, Reason: "down"}, "b": {Up: true}})
+	if got, _ := tbl.Choose("x", "404", "10"); got.VendorID != "b" {
+		t.Fatalf("lcr skips a down vendor: %+v", got)
+	}
+	if got, _ := tbl.Choose("vip", "404", "10"); got.VendorID != "c" {
+		t.Fatalf("priority falls over: %+v", got)
+	}
+	if got, _ := tbl.Choose("x", "404", "10", "b"); got.VendorID != "c" {
+		t.Fatalf("avoid list: %+v", got)
+	}
+	// Nothing healthy left: queue at a down vendor rather than refuse.
+	if got, err := tbl.Choose("x", "404", "10", "b", "c"); err != nil || got.VendorID != "a" {
+		t.Fatalf("all others avoided: %+v %v", got, err)
+	}
+	h.Set(map[string]vendorhealth.State{"a": {Up: false}, "b": {Up: false}, "c": {Up: false}})
+	if got, err := tbl.Choose("x", "404", "10"); err != nil || got.VendorID != "a" {
+		t.Fatalf("all down: cheapest anyway: %+v %v", got, err)
+	}
+	// Every vendor avoided: still routed (the connector stops rerouting after MaxReroutes).
+	if _, err := tbl.Choose("x", "404", "10", "a", "b", "c"); err != nil {
+		t.Fatalf("all avoided: %v", err)
 	}
 }

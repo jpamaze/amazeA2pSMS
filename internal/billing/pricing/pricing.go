@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+
+	"github.com/jpamaze/amazeA2pSMS/internal/numbering"
 )
 
 // ErrNoPrice means the account has no rate for this destination.
@@ -45,13 +47,15 @@ func NewCached(pool *pgxpool.Pool, ttl time.Duration) *Cached {
 	return &Cached{pool: pool, ttl: ttl, cache: map[string]entry{}}
 }
 
+// The network's own entry wins, then its MCC's '*' entry, then the
+// country-wide entry (India: 404/*, see numbering.CountryMCC).
 const query = `
 SELECT e.price
 FROM accounts a
 JOIN rate_card_entries e ON e.rate_card_id = a.rate_card_id
-WHERE a.id = $1 AND e.mcc = $2 AND e.mnc IN ($3, '*') AND e.category IN ($4, '*')
-  AND e.valid_from <= now()
-ORDER BY (e.mnc = '*'), (e.category = '*'), e.valid_from DESC
+WHERE a.id = $1 AND ((e.mcc = $2 AND e.mnc IN ($3, '*')) OR (e.mcc = $5 AND e.mnc = '*'))
+  AND e.category IN ($4, '*') AND e.valid_from <= now()
+ORDER BY (e.mcc <> $2), (e.mnc = '*'), (e.category = '*'), e.valid_from DESC
 LIMIT 1`
 
 // Price implements Pricer.
@@ -69,7 +73,7 @@ func (c *Cached) Price(ctx context.Context, accountID, mcc, mnc, category string
 	}
 
 	var price decimal.Decimal
-	err := c.pool.QueryRow(ctx, query, accountID, mcc, mnc, category).Scan(&price)
+	err := c.pool.QueryRow(ctx, query, accountID, mcc, mnc, category, numbering.CountryMCC(mcc)).Scan(&price)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNoPrice
 	} else if err != nil {

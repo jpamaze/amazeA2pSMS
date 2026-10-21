@@ -73,6 +73,18 @@ var (
 	VendorBindsUp = f.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "sms_vendor_binds_up", Help: "Vendor SMPP binds currently bound.",
 	}, []string{"vendor"})
+	VendorRoutable = f.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "sms_vendor_routable", Help: "1 while the vendor is in routing, 0 while failover has taken it out.",
+	}, []string{"vendor"})
+	FirewallHits = f.NewCounterVec(prometheus.CounterOpts{
+		Name: "sms_firewall_hits_total", Help: "Firewall rule and velocity matches by kind and action (reject or flag).",
+	}, []string{"kind", "action"})
+	HLRLookups = f.NewCounterVec(prometheus.CounterOpts{
+		Name: "sms_hlr_lookups_total", Help: "HLR answers by source (cache or provider) and status.",
+	}, []string{"source", "status"})
+	Rerouted = f.NewCounterVec(prometheus.CounterOpts{
+		Name: "sms_rerouted_total", Help: "Messages a connector handed back for another route.",
+	}, []string{"from_vendor", "reason"})
 )
 
 // Kafka consumers.

@@ -26,8 +26,8 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 | smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices, DLT registrations) |
 | http-api | REST | `sms.submit` | Redis, PG |
 | admin-api | REST | — | PG, Redis, ClickHouse (usage reports) |
-| router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, costs and vendor deals, refreshed from PG; Redis (vendor deal progress) |
-| connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
+| router | `sms.submit`, `sms.reroute` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, costs and vendor deals, refreshed from PG; Redis (vendor deal progress, failover verdicts, HLR cache); HLR provider |
+| connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo`, `sms.reroute` (failover) | Redis (vendor msg ID map), PG (binds) |
 | dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis; PG (vendor error codes, reloaded every minute) |
 | rater | `sms.status` | — | Redis wallet and deal reservations, PG ledger + `rater_offsets` + deal usage |
 | webhook-dispatcher | `sms.webhooks`, `sms.webhooks.retry.1-4` | retry tiers, `sms.webhooks.dead` | PG (webhook URL, encrypted secret) |
@@ -35,9 +35,11 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 
 HTTP vendors: the connector POSTs per `http_vendor_profiles` and serves `/dlr/<vendor>?token=…` on `DLR_ADDR`; receipts go to `sms.dlr` exactly like SMPP ones.
 
-Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency), `binds:{system_id}` (cross-node bind leases), `deal:{id}` and `deal:{id}:res` (customer deal volume used and reserved per message), `vdeal:{id}` (segments routed under a vendor deal).
+Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency), `binds:{system_id}` (cross-node bind leases), `deal:{id}` and `deal:{id}:res` (customer deal volume used and reserved per message), `vdeal:{id}` (segments routed under a vendor deal), `vhealth` / `vstate` / `vdlr:{vendor}:<minute>` (failover reports, verdicts, receipt counts), `mnp:<8 digits>` (ported numbers), `hlr:<msisdn>` (HLR cache), `fw:{acct}:h:<range>:<hour>` and `fw:{acct}:b:<range>` (firewall counters and range blocks).
 
 Final receipts (deliver_sm or webhook) and the ClickHouse row are queued before the message is marked notified, so a crash repeats rather than loses them; customers should treat receipts and webhooks as at-least-once and de-duplicate by message ID.
+
+Submit checks, in order: number, text, DLT ([phase3-dlt.md](phase3-dlt.md)), firewall rules, then one Redis round trip for MNP and firewall velocity ([phase3-network.md](phase3-network.md)), then pricing and holds.
 
 Billing: every account in the sender's chain below the platform is charged (two-level wallets; see [phase2-billing.md](phase2-billing.md)). Each is charged when the vendor accepts a message (`submitted`, or `failed` after at least one part was accepted) and the hold is released when the platform rejects it or no part was accepted.
 

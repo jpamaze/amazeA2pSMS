@@ -203,6 +203,22 @@ func (b *Bind) Submit(ctx context.Context, sm *pdu.SM) (string, error) {
 type Pool struct {
 	binds []*Bind
 	next  atomic.Uint64
+	// Down, when set, reports that failover has taken the vendor out of
+	// routing; Pick then stops waiting for a bind so the message can move.
+	Down func() bool
+}
+
+// Binds reports sending binds up and in total.
+func (p *Pool) Binds() (up, total int) {
+	for _, b := range p.binds {
+		if b.CanSend() {
+			total++
+			if b.Up() {
+				up++
+			}
+		}
+	}
+	return up, total
 }
 
 // NewPool returns a pool of binds.
@@ -228,6 +244,9 @@ func (p *Pool) Pick(ctx context.Context) (*Bind, error) {
 		}
 		if len(waits) == 0 {
 			return nil, errors.New("connector: vendor has no sending binds")
+		}
+		if p.Down != nil && p.Down() {
+			return nil, ErrVendorDown
 		}
 		// Wait for any bind to come up (poll the rest every 200ms).
 		select {

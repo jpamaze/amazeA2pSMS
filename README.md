@@ -25,6 +25,7 @@ Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: cu
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
 | `internal/billing/credit` | Credit limit changes (platform: any account; reseller: own sub-accounts within its balance) |
 | `internal/billing/hierarchy`, `internal/billing/ledger` | Reseller chain for two-level charging; top-ups, reseller-to-sub-account transfers, dispute credits ([docs/phase2-billing.md](docs/phase2-billing.md)) |
+| `internal/vendorhealth`, `internal/network`, `internal/firewall` | Vendor failover, MNP / number series / HLR, firewall rules and SMS-pumping limits ([docs/phase3-network.md](docs/phase3-network.md)) |
 | `internal/dlt` | India DLT: template matching, entity/header/category checks, whitelists, TM chain, CSV import, vendor error codes ([docs/phase3-dlt.md](docs/phase3-dlt.md)) |
 | `internal/billing/deals`, `internal/billing/recon` | Customer deals (capped volume reserved in Redis), vendor deal progress, vendor invoice reconciliation ([docs/phase2-deals-disputes.md](docs/phase2-deals-disputes.md)) |
 | `internal/platform/*` | Config, logging, health, metrics, Kafka, Redis, PostgreSQL |
@@ -95,4 +96,4 @@ The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` 
 
 ## Next
 
-Run the 5,000 TPS sign-off on VMs ([docs/signoff-5k.md](docs/signoff-5k.md)). Phase 2 is done: slice 1 (reseller billing, rate cards, transfers, statements and usage, [docs/phase2-billing.md](docs/phase2-billing.md)) and slice 2 (customer and vendor deals, customer and vendor disputes, [docs/phase2-deals-disputes.md](docs/phase2-deals-disputes.md)). Phase 3 slice 1 (India DLT enforcement, [docs/phase3-dlt.md](docs/phase3-dlt.md)) is done; slice 2 is the firewall, HLR/MNP and vendor failover.
+Run the 5,000 TPS sign-off on VMs ([docs/signoff-5k.md](docs/signoff-5k.md)). Phase 2 is done: slice 1 (reseller billing, rate cards, transfers, statements and usage, [docs/phase2-billing.md](docs/phase2-billing.md)) and slice 2 (customer and vendor deals, customer and vendor disputes, [docs/phase2-deals-disputes.md](docs/phase2-deals-disputes.md)). Phase 3 is done: India DLT enforcement ([docs/phase3-dlt.md](docs/phase3-dlt.md)) and vendor failover, HLR/MNP and the firewall ([docs/phase3-network.md](docs/phase3-network.md)). Still open from the blueprint's routing and compliance phase: MO delivery to customers and hubbing, and country profiles beyond India. Next phase: portals and reports (admin, reseller and customer portals, live monitoring, alerts).

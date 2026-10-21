@@ -22,6 +22,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/gsm7"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/pdu"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/session"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 // MaxAttempts is how often one request is tried on temporary errors.
@@ -35,6 +36,13 @@ type Transport interface {
 	// Window is how many messages may be in flight at once.
 	Window() int
 }
+
+// ErrVendorDown means failover took the vendor out of routing while the
+// message waited; it goes to another route.
+var ErrVendorDown = errors.New("connector: vendor out of routing")
+
+// MaxReroutes is how many times one message may fail over to another vendor.
+const MaxReroutes = 2
 
 // SendError is a vendor refusal with a platform error code.
 type SendError struct {
@@ -53,6 +61,10 @@ type Connector struct {
 	Store     *msgstore.Store
 	Kafka     *kgo.Client
 	Log       *slog.Logger
+	Health    *vendorhealth.Recorder // submit outcomes for failover; nil = not recorded
+	// Down reports that failover has taken this vendor out of routing.
+	// Messages not yet sent then go back to the router; nil = never.
+	Down func() bool
 }
 
 // Process sends a batch of routed records concurrently and publishes one
@@ -80,6 +92,7 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 
 	sem := make(chan struct{}, c.Transport.Window())
 	events := make([]*domain.StatusEvent, len(recs))
+	reroutes := make([]*domain.Message, len(recs))
 	var wg sync.WaitGroup
 	for i, mp := range msgs {
 		if mp == nil {
@@ -95,7 +108,7 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 		go func(i int, m domain.Message) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			events[i] = c.send(ctx, &m, sentBy[m.ID])
+			events[i], reroutes[i] = c.send(ctx, &m, sentBy[m.ID])
 		}(i, m)
 	}
 	wg.Wait()
@@ -104,11 +117,17 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 	}
 
 	out := make([]*kgo.Record, 0, len(events))
-	for _, ev := range events {
-		if ev == nil {
+	for i, ev := range events {
+		var r *kgo.Record
+		var err error
+		switch {
+		case reroutes[i] != nil:
+			r, err = kafka.Record(kafka.TopicReroute, reroutes[i].ID, reroutes[i])
+		case ev != nil:
+			r, err = kafka.Record(kafka.TopicStatus, ev.MessageID, ev)
+		default:
 			continue
 		}
-		r, err := kafka.Record(kafka.TopicStatus, ev.MessageID, ev)
 		if err != nil {
 			return err
 		}
@@ -117,7 +136,9 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 	return kafka.ProduceJSON(ctx, c.Kafka, out...)
 }
 
-func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) *domain.StatusEvent {
+// send returns the message's status event, or the message to hand back to
+// the router for another vendor (failover).
+func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) (*domain.StatusEvent, *domain.Message) {
 	ev := &domain.StatusEvent{
 		MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, Charges: m.Charges, VendorID: c.VendorID,
 	}
@@ -125,14 +146,31 @@ func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) 
 	// offset was committed) is not sent twice.
 	if sentTo == c.VendorID {
 		ev.Status, ev.At = domain.StatusSubmitted, time.Now().UTC()
-		return ev
+		return ev, nil
+	}
+	if c.Down != nil && c.Down() && len(m.Avoid) < MaxReroutes {
+		return nil, c.reroute(m, "vendor_down")
 	}
 	start := time.Now()
 	vmids, err := c.Transport.Send(ctx, m)
-	metrics.VendorSubmitSeconds.WithLabelValues(c.VendorID).Observe(time.Since(start).Seconds())
+	took := time.Since(start)
+	metrics.VendorSubmitSeconds.WithLabelValues(c.VendorID).Observe(took.Seconds())
+	if c.Health != nil && !errors.Is(err, ErrVendorDown) && ctx.Err() == nil {
+		c.Health.Submit(took, err, isTemporary(err))
+	}
+	// Nothing reached the vendor and the vendor is the problem: another
+	// route may deliver it.
+	if err != nil && len(vmids) == 0 && ctx.Err() == nil && len(m.Avoid) < MaxReroutes &&
+		(errors.Is(err, ErrVendorDown) || isTemporary(err)) {
+		reason := "send_failed"
+		if errors.Is(err, ErrVendorDown) {
+			reason = "vendor_down"
+		}
+		return nil, c.reroute(m, reason)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil
+			return nil, nil
 		}
 		ev.Status, ev.ErrorCode, ev.At = domain.StatusFailed, errorCode(err), time.Now().UTC()
 		c.Log.Info("vendor refused message", "message", m.ID, "err", err)
@@ -153,7 +191,38 @@ func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) 
 		ev.Status, ev.At = domain.StatusSubmitted, time.Now().UTC()
 	}
 	metrics.VendorSubmits.WithLabelValues(c.VendorID, string(ev.Status)).Inc()
-	return ev
+	return ev, nil
+}
+
+func (c *Connector) reroute(m *domain.Message, reason string) *domain.Message {
+	out := *m
+	out.Route = nil
+	out.Avoid = append(append([]string(nil), m.Avoid...), c.VendorID)
+	metrics.Rerouted.WithLabelValues(c.VendorID, reason).Inc()
+	if c.Health != nil {
+		c.Health.Rerouted()
+	}
+	return &out
+}
+
+// isTemporary reports a failure that says the vendor, not the message, is
+// the problem (SMPP throttling, timeouts, lost binds; HTTP 5xx, timeouts).
+func isTemporary(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *SendError
+	if errors.As(err, &se) {
+		return se.Temporary
+	}
+	var st *session.StatusError
+	if errors.As(err, &st) {
+		return temporary(err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return true // transport errors: lost bind, connection refused, timeouts
 }
 
 // withRetry runs try up to MaxAttempts times while isTemp says the error is
@@ -188,6 +257,9 @@ type SMPPTransport struct {
 
 // Window implements Transport.
 func (t *SMPPTransport) Window() int { return t.Pool.Window() }
+
+// Binds reports sending binds up and in total.
+func (t *SMPPTransport) Binds() (up, total int) { return t.Pool.Binds() }
 
 // Send implements Transport: one submit_sm per part.
 func (t *SMPPTransport) Send(ctx context.Context, m *domain.Message) ([]string, error) {

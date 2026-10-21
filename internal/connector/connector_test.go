@@ -2,7 +2,11 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/gsm7"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/pdu"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/session"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 func newConn() *SMPPTransport {
@@ -102,5 +107,61 @@ func TestTemporary(t *testing.T) {
 	}
 	if got := errorCode(&session.StatusError{Status: pdu.StatusInvDstAdr}); got != "SMPP_0000000B" {
 		t.Errorf("errorCode: %s", got)
+	}
+}
+
+type fakeTransport struct {
+	err   error
+	calls int
+}
+
+func (f *fakeTransport) Send(context.Context, *domain.Message) ([]string, error) {
+	f.calls++
+	return nil, f.err
+}
+func (f *fakeTransport) Window() int { return 1 }
+
+func TestFailoverReroute(t *testing.T) {
+	ctx := context.Background()
+	down := false
+	ft := &fakeTransport{}
+	c := &Connector{VendorID: "v1", Transport: ft, Health: &vendorhealth.Recorder{}, Down: func() bool { return down },
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	m := &domain.Message{ID: "m1", Route: &domain.Route{VendorID: "v1"}}
+
+	// Vendor out of routing: not sent, handed back with v1 avoided.
+	down = true
+	ev, re := c.send(ctx, m, "")
+	if ev != nil || re == nil || re.Route != nil || !slices.Equal(re.Avoid, []string{"v1"}) || ft.calls != 0 {
+		t.Fatalf("down: ev=%v re=%+v calls=%d", ev, re, ft.calls)
+	}
+	if m.Avoid != nil {
+		t.Fatal("the original message must not be changed")
+	}
+	// Already failed over twice: tried here anyway.
+	down = false
+	ft.err = &session.StatusError{Status: pdu.StatusThrottled}
+	tired := &domain.Message{ID: "m2", Avoid: []string{"a", "b"}}
+	if ev, re := c.send(ctx, tired, ""); ev == nil || re != nil || ev.Status != domain.StatusFailed {
+		t.Fatalf("max reroutes: ev=%+v re=%+v", ev, re)
+	}
+	// Temporary failure: rerouted. Permanent refusal: failed.
+	if _, re := c.send(ctx, m, ""); re == nil {
+		t.Fatal("throttled: reroute")
+	}
+	ft.err = &session.StatusError{Status: pdu.StatusInvDstAdr}
+	if ev, re := c.send(ctx, m, ""); re != nil || ev.Status != domain.StatusFailed {
+		t.Fatalf("invalid destination: ev=%+v re=%+v", ev, re)
+	}
+	ft.err = errors.New("dial tcp: connection refused")
+	if _, re := c.send(ctx, m, ""); re == nil {
+		t.Fatal("transport error: reroute")
+	}
+	ft.err = &SendError{Code: "HTTP_400", Err: errors.New("bad")}
+	if _, re := c.send(ctx, m, ""); re != nil {
+		t.Fatal("HTTP 4xx is the message's fault, not the vendor's")
+	}
+	if s := c.Health.Snapshot(1, 1); s.Failed != 3 || s.Rerouted != 3 {
+		t.Fatalf("health: %+v", s)
 	}
 }

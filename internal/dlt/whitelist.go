@@ -28,8 +28,8 @@ func (w *Whitelist) Add(kind, value string) {
 // common TLD (so "Rs.500" or "Mr.Rao" are not taken for links).
 var linkRe = regexp.MustCompile(`(?i)\b(?:https?://\S+|www\.\S+|[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|in|co|net|org|io|ly|me|app|info|biz|xyz|gl|link|page|ai|to|cc|us|online|site|store|shop)(?:/\S*)?)`)
 
-// links returns the links found in s.
-func links(s string) []string {
+// Links returns the links found in s.
+func Links(s string) []string {
 	var out []string
 	for _, l := range linkRe.FindAllString(s, -1) {
 		out = append(out, strings.TrimRight(l, ".,;:!?)\"'"))
@@ -91,7 +91,7 @@ func normNumber(s string) string {
 // {#cbn#} value must be a whitelisted callback number.
 func (w *Whitelist) checkValues(vals []Value) *Error {
 	for _, v := range vals {
-		for _, l := range links(v.Text) {
+		for _, l := range Links(v.Text) {
 			if strings.HasSuffix(strings.ToLower(strings.SplitN(normURL(l), "?", 2)[0]), ".apk") {
 				if !allowed(l, w.APKs) {
 					return fail(ReasonURL, "APK link %q is not whitelisted on the template", l)
@@ -102,7 +102,7 @@ func (w *Whitelist) checkValues(vals []Value) *Error {
 				return fail(ReasonURL, "link %q is not whitelisted on the template", l)
 			}
 		}
-		if (v.Kind == KindURL || v.Kind == KindURLOTT) && len(links(v.Text)) == 0 && strings.TrimSpace(v.Text) != "" {
+		if (v.Kind == KindURL || v.Kind == KindURLOTT) && len(Links(v.Text)) == 0 && strings.TrimSpace(v.Text) != "" {
 			if !allowed(v.Text, w.URLs) {
 				return fail(ReasonURL, "link %q is not whitelisted on the template", v.Text)
 			}

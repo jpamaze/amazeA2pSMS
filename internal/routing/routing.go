@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,8 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
+	"github.com/jpamaze/amazeA2pSMS/internal/numbering"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 // ErrNoRoute means no active vendor can take the message.
@@ -36,6 +39,8 @@ type Rule struct {
 	VendorID  string
 	Priority  int
 	Weight    int
+	HLR       bool // look the number up before routing
+	HLRReject bool // refuse numbers the HLR reports invalid or absent
 }
 
 // VendorDeal is one row of vendor_deals.
@@ -81,6 +86,29 @@ func (p *Progress) Set(m map[string]int64) {
 	p.routed = m
 }
 
+// Health is the shared set of vendors out of routing (vendorhealth verdicts).
+type Health struct {
+	down atomic.Pointer[map[string]bool]
+}
+
+// Down reports whether vendor is out of routing.
+func (h *Health) Down(vendor string) bool {
+	if h == nil {
+		return false
+	}
+	m := h.down.Load()
+	return m != nil && (*m)[vendor]
+}
+
+// Set replaces the verdicts.
+func (h *Health) Set(states map[string]vendorhealth.State) {
+	m := make(map[string]bool, len(states))
+	for v, st := range states {
+		m[v] = !st.Up
+	}
+	h.down.Store(&m)
+}
+
 // Table is an immutable snapshot of routing config.
 type Table struct {
 	rules    []Rule
@@ -88,6 +116,8 @@ type Table struct {
 	costs    map[string]map[string]decimal.Decimal // vendor -> "mcc|mnc" -> cost
 	deals    map[string][]VendorDeal               // vendor -> deals not yet ended
 	progress *Progress
+	health   *Health
+	policies map[string]vendorhealth.Policy
 	now      func() time.Time
 	loadedAt time.Time
 }
@@ -98,6 +128,37 @@ func NewTable(rules []Rule, active map[string]bool, costs map[string]map[string]
 	sort.SliceStable(r, func(i, j int) bool { return r[i].Priority < r[j].Priority })
 	return &Table{rules: r, active: active, costs: costs, now: time.Now, loadedAt: time.Now()}
 }
+
+// HLRPolicy says whether messages from an account to an MCC get an HLR
+// lookup before routing, and whether invalid or absent numbers are refused.
+// The account's own rules decide if it has any for the MCC, else the
+// platform's; any matching rule with HLR on turns it on.
+func (t *Table) HLRPolicy(accountID, mcc string) (lookup, reject bool) {
+	country := numbering.CountryMCC(mcc)
+	for _, scope := range []string{accountID, ""} {
+		found := false
+		for _, r := range t.rules {
+			if r.AccountID == scope && (r.MCC == mcc || r.MCC == country) {
+				found = true
+				lookup = lookup || r.HLR
+				reject = reject || (r.HLR && r.HLRReject)
+			}
+		}
+		if found {
+			return lookup, reject
+		}
+	}
+	return false, false
+}
+
+// WithHealth makes the table skip vendors h marks down.
+func (t *Table) WithHealth(h *Health) *Table {
+	t.health = h
+	return t
+}
+
+// Policies returns each vendor's failover policy.
+func (t *Table) Policies() map[string]vendorhealth.Policy { return t.policies }
 
 // WithDeals adds vendor deals and their shared progress counter (nil counts
 // nothing as routed yet). Call it before the table is in use.
@@ -119,26 +180,43 @@ type Decision struct {
 }
 
 // Choose picks a vendor. Account-specific rules win over platform defaults;
-// within a set, lower priority numbers are tried first.
-func (t *Table) Choose(accountID, mcc, mnc string) (Decision, error) {
-	for _, scope := range []string{accountID, ""} {
-		if scope == "" && accountID == "" {
-			continue
-		}
-		var matched []Rule
-		for _, r := range t.rules {
-			if r.AccountID == scope && r.MCC == mcc && (r.MNC == "*" || r.MNC == mnc) {
-				matched = append(matched, r)
-			}
-		}
-		if d, ok := t.pick(matched, mcc, mnc); ok {
+// within a set, lower priority numbers are tried first. Vendors out of
+// routing for health, and vendors in avoid (ones this message already
+// failed over from), are skipped. If that leaves nothing, health is ignored
+// (better to queue at a vendor that may recover than to refuse), and then
+// avoid too.
+func (t *Table) Choose(accountID, mcc, mnc string, avoid ...string) (Decision, error) {
+	healthy := func(v string) bool { return t.active[v] && !slices.Contains(avoid, v) && !t.health.Down(v) }
+	notAvoided := func(v string) bool { return t.active[v] && !slices.Contains(avoid, v) }
+	active := func(v string) bool { return t.active[v] }
+	for _, usable := range []func(string) bool{healthy, notAvoided, active} {
+		if d, err := t.choose(accountID, mcc, mnc, usable); err == nil {
 			return d, nil
 		}
 	}
 	return Decision{}, ErrNoRoute
 }
 
-func (t *Table) pick(rules []Rule, mcc, mnc string) (Decision, bool) {
+func (t *Table) choose(accountID, mcc, mnc string, usable func(string) bool) (Decision, error) {
+	country := numbering.CountryMCC(mcc)
+	for _, scope := range []string{accountID, ""} {
+		if scope == "" && accountID == "" {
+			continue
+		}
+		var matched []Rule
+		for _, r := range t.rules {
+			if r.AccountID == scope && ((r.MCC == mcc && (r.MNC == "*" || r.MNC == mnc)) || (r.MCC == country && r.MCC != mcc && r.MNC == "*")) {
+				matched = append(matched, r)
+			}
+		}
+		if d, ok := t.pick(matched, mcc, mnc, usable); ok {
+			return d, nil
+		}
+	}
+	return Decision{}, ErrNoRoute
+}
+
+func (t *Table) pick(rules []Rule, mcc, mnc string, usable func(string) bool) (Decision, bool) {
 	for i := 0; i < len(rules); {
 		j := i
 		for j < len(rules) && rules[j].Priority == rules[i].Priority {
@@ -151,16 +229,16 @@ func (t *Table) pick(rules []Rule, mcc, mnc string) (Decision, bool) {
 		for _, r := range group {
 			switch r.Mode {
 			case "lcr":
-				if d, ok := t.cheapest(mcc, mnc); ok {
+				if d, ok := t.cheapest(mcc, mnc, usable); ok {
 					return d, true
 				}
 			case "priority":
-				if t.active[r.VendorID] {
+				if usable(r.VendorID) {
 					d, _, _ := t.price(r.VendorID, mcc, mnc)
 					return d, true
 				}
 			case "weighted":
-				if t.active[r.VendorID] {
+				if usable(r.VendorID) {
 					weighted = append(weighted, r)
 				}
 			}
@@ -193,12 +271,13 @@ func (t *Table) price(vendor, mcc, mnc string) (d Decision, open, ok bool) {
 		return d, t.progress.Get(deal.ID) < deal.Commit, true
 	}
 	m := t.costs[vendor]
-	if c, found := m[mcc+"|"+mnc]; found {
-		d.Cost = c
-		return d, false, true
+	for _, k := range []string{mcc + "|" + mnc, mcc + "|*", numbering.CountryMCC(mcc) + "|*"} {
+		if c, found := m[k]; found {
+			d.Cost = c
+			return d, false, true
+		}
 	}
-	d.Cost, ok = m[mcc+"|*"]
-	return d, false, ok
+	return d, false, false
 }
 
 // deal returns the vendor's deal running now for the destination; one for
@@ -208,10 +287,12 @@ func (t *Table) deal(vendor, mcc, mnc string) *VendorDeal {
 	var best *VendorDeal
 	for i := range t.deals[vendor] {
 		d := &t.deals[vendor][i]
-		if d.MCC != mcc || (d.MNC != "*" && d.MNC != mnc) || now.Before(d.Starts) || !now.Before(d.Ends) {
+		exact := d.MCC == mcc && (d.MNC == "*" || d.MNC == mnc)
+		countryWide := d.MCC == numbering.CountryMCC(mcc) && d.MNC == "*"
+		if !(exact || countryWide) || now.Before(d.Starts) || !now.Before(d.Ends) {
 			continue
 		}
-		if best == nil || (best.MNC == "*" && d.MNC != "*") {
+		if best == nil || dealRank(d, mcc) > dealRank(best, mcc) {
 			best = d
 		}
 	}
@@ -220,7 +301,7 @@ func (t *Table) deal(vendor, mcc, mnc string) *VendorDeal {
 
 // cheapest picks the lowest cost among vendors with an unmet deal
 // commitment, or among all active vendors when there are none.
-func (t *Table) cheapest(mcc, mnc string) (Decision, bool) {
+func (t *Table) cheapest(mcc, mnc string, usable func(string) bool) (Decision, bool) {
 	seen := map[string]bool{}
 	vendors := make([]string, 0, len(t.costs)+len(t.deals))
 	for _, m := range []map[string]bool{keys(t.costs), keys(t.deals)} {
@@ -235,7 +316,7 @@ func (t *Table) cheapest(mcc, mnc string) (Decision, bool) {
 	var best, bestOpen Decision
 	found, foundOpen := false, false
 	for _, v := range vendors {
-		if !t.active[v] {
+		if !usable(v) {
 			continue
 		}
 		d, open, ok := t.price(v, mcc, mnc)
@@ -255,6 +336,17 @@ func (t *Table) cheapest(mcc, mnc string) (Decision, bool) {
 	return best, found
 }
 
+// dealRank: network deal > MCC-wide deal > country-wide deal.
+func dealRank(d *VendorDeal, mcc string) int {
+	switch {
+	case d.MCC == mcc && d.MNC != "*":
+		return 2
+	case d.MCC == mcc:
+		return 1
+	}
+	return 0
+}
+
 func keys[V any](m map[string]V) map[string]bool {
 	out := make(map[string]bool, len(m))
 	for k := range m {
@@ -271,11 +363,12 @@ type Loader struct {
 	log      *slog.Logger
 	table    atomic.Pointer[Table]
 	Progress *Progress
+	Health   *Health
 }
 
 // NewLoader loads once and returns the loader. rdb may be nil.
 func NewLoader(ctx context.Context, pool *pgxpool.Pool, rdb redis.UniversalClient, log *slog.Logger) (*Loader, error) {
-	l := &Loader{pool: pool, rdb: rdb, log: log, Progress: &Progress{}}
+	l := &Loader{pool: pool, rdb: rdb, log: log, Progress: &Progress{}, Health: &Health{}}
 	t, err := l.load(ctx)
 	if err != nil {
 		return nil, err
@@ -309,7 +402,7 @@ func (l *Loader) Run(ctx context.Context, every time.Duration) {
 
 func (l *Loader) load(ctx context.Context) (*Table, error) {
 	rows, err := l.pool.Query(ctx, `
-		SELECT coalesce(account_id::text, ''), mcc, mnc, mode, coalesce(vendor_id, ''), priority, weight
+		SELECT coalesce(account_id::text, ''), mcc, mnc, mode, coalesce(vendor_id, ''), priority, weight, hlr, hlr_reject
 		FROM routes WHERE enabled`)
 	if err != nil {
 		return nil, err
@@ -317,7 +410,7 @@ func (l *Loader) load(ctx context.Context) (*Table, error) {
 	var rules []Rule
 	for rows.Next() {
 		var r Rule
-		if err := rows.Scan(&r.AccountID, &r.MCC, &r.MNC, &r.Mode, &r.VendorID, &r.Priority, &r.Weight); err != nil {
+		if err := rows.Scan(&r.AccountID, &r.MCC, &r.MNC, &r.Mode, &r.VendorID, &r.Priority, &r.Weight, &r.HLR, &r.HLRReject); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)
@@ -327,17 +420,25 @@ func (l *Loader) load(ctx context.Context) (*Table, error) {
 	}
 
 	active := map[string]bool{}
-	rows, err = l.pool.Query(ctx, `SELECT id, status = 'active' FROM vendors`)
+	policies := map[string]vendorhealth.Policy{}
+	rows, err = l.pool.Query(ctx, `SELECT id, status = 'active', failover_enabled, failover_max_submit_ms,
+		failover_max_error_pct, failover_min_dlr_pct, failover_dlr_window_min, failover_cooldown_s FROM vendors`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var id string
 		var ok bool
-		if err := rows.Scan(&id, &ok); err != nil {
+		var p vendorhealth.Policy
+		var dlrMin, cool int
+		if err := rows.Scan(&id, &ok, &p.Enabled, &p.MaxSubmitMs, &p.MaxErrorPct, &p.MinDLRPct, &dlrMin, &cool); err != nil {
 			return nil, err
 		}
+		p.DLRWindow, p.Cooldown = time.Duration(dlrMin)*time.Minute, time.Duration(cool)*time.Second
 		active[id] = ok
+		if ok {
+			policies[id] = p
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -392,5 +493,7 @@ func (l *Loader) load(ctx context.Context) (*Table, error) {
 			l.Progress.Set(n)
 		}
 	}
-	return NewTable(rules, active, costs).WithDeals(vds, l.Progress), nil
+	t := NewTable(rules, active, costs).WithDeals(vds, l.Progress).WithHealth(l.Health)
+	t.policies = policies
+	return t, nil
 }

@@ -19,11 +19,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
+
+	"github.com/jpamaze/amazeA2pSMS/internal/numbering"
 )
 
 // Deal is an active customer deal.
 type Deal struct {
 	ID     string
+	MCC    string
 	MNC    string // '*' for every network
 	Price  decimal.Decimal
 	Cap    int64 // segments; 0 = no cap
@@ -58,13 +61,23 @@ func (b *Book) Find(ctx context.Context, accountID, mcc, mnc string) (*Deal, err
 	}
 	now := time.Now()
 	var best *Deal
+	rank := func(d *Deal) int { // network deal > MCC-wide > country-wide
+		switch {
+		case d.MCC == mcc && d.MNC != "*":
+			return 2
+		case d.MCC == mcc:
+			return 1
+		}
+		return 0
+	}
 	for i := range list {
 		d := &list[i]
-		if now.Before(d.Starts) || !now.Before(d.Ends) || (d.MNC != "*" && d.MNC != mnc) {
+		exact := d.MCC == mcc && (d.MNC == "*" || d.MNC == mnc)
+		countryWide := d.MNC == "*" // loaded for this MCC or its country MCC
+		if now.Before(d.Starts) || !now.Before(d.Ends) || !(exact || countryWide) {
 			continue
 		}
-		if best == nil || (d.MNC != "*" && best.MNC == "*") ||
-			((d.MNC == "*") == (best.MNC == "*") && d.Starts.After(best.Starts)) {
+		if best == nil || rank(d) > rank(best) || (rank(d) == rank(best) && d.Starts.After(best.Starts)) {
 			best = d
 		}
 	}
@@ -80,8 +93,9 @@ func (b *Book) load(ctx context.Context, accountID, mcc string) ([]Deal, error) 
 	if ok && now.Before(c.expires) {
 		return c.deals, nil
 	}
-	rows, err := b.PG.Query(ctx, `SELECT id, mnc, price, coalesce(cap_segments, 0), used_segments, starts_at, ends_at
-		FROM customer_deals WHERE account_id = $1 AND mcc = $2 AND status = 'active' AND ends_at > now()`, accountID, mcc)
+	rows, err := b.PG.Query(ctx, `SELECT id, mcc, mnc, price, coalesce(cap_segments, 0), used_segments, starts_at, ends_at
+		FROM customer_deals WHERE account_id = $1 AND mcc IN ($2, $3) AND status = 'active' AND ends_at > now()`,
+		accountID, mcc, numbering.CountryMCC(mcc))
 	if err != nil {
 		return nil, fmt.Errorf("deals: %w", err)
 	}
@@ -89,7 +103,7 @@ func (b *Book) load(ctx context.Context, accountID, mcc string) ([]Deal, error) 
 	var list []Deal
 	for rows.Next() {
 		var d Deal
-		if err := rows.Scan(&d.ID, &d.MNC, &d.Price, &d.Cap, &d.Used, &d.Starts, &d.Ends); err != nil {
+		if err := rows.Scan(&d.ID, &d.MCC, &d.MNC, &d.Price, &d.Cap, &d.Used, &d.Starts, &d.Ends); err != nil {
 			return nil, fmt.Errorf("deals: %w", err)
 		}
 		list = append(list, d)

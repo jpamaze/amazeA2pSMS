@@ -76,7 +76,7 @@ Start `STEADY_DURATION=20m scripts/signoff.sh run`, then do one drill at each ma
 | 3 min | Kill a connector | on app-1: `docker kill amaze-app-connector-sim-1` | app-2's connector takes the partitions within about 10 s; restart policy brings app-1's back |
 | 6 min | Kill a Kafka broker | on kafka-2: `docker kill amaze-kafka-redpanda-1`, start it again after 2 min | no refused submits (acks=all with 2 of 3 in sync); brief latency spike |
 | 10 min | Kill an SMPP edge | on app-2: `docker kill amaze-app-smpp-server-1` | load generator binds on app-2 drop; binds on app-1 keep sending; receipts for app-2's binds wait in Redis until a bind returns |
-| 14 min | Vendor outage | on sim-1: `docker stop amaze-sim-smpp-sim-1`, start after 60 s | messages queue in Kafka and drain on reconnect; nothing refused at the edge |
+| 14 min | Vendor outage | on sim-1: `docker stop amaze-sim-smpp-sim-1`, start after 60 s | failover takes `sim` out of routing within about 3 s (`sms_vendor_routable{vendor="sim"} 0`); new and queued traffic moves to `httpsim` (`sms_rerouted_total`); `sim` returns within seconds of restarting; nothing refused at the edge. Receipts `sim` owed when it died are lost with the simulator (a real vendor keeps them) |
 | 18 min | Restart PostgreSQL | on data-1: `docker restart amaze-data-postgres-1` | message path continues (no per-message database queries); rater catches up |
 
 The SMPP-edge drill makes the load generator report failed submits on the dropped binds. That is expected, and that run is judged on billing and lost messages only.

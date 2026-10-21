@@ -59,6 +59,7 @@ paths:
             no_rate: no rate for this destination on the account's rate card.
             dlt_entity, dlt_header, dlt_template, dlt_category, dlt_promo_hours, dlt_consent, dlt_tm_chain, dlt_url, dlt_callback:
             the message fails India DLT (see docs/phase3-dlt.md); error explains which registration is missing or does not match.
+            fw_sender, fw_content, fw_url, fw_destination, fw_destination_rate, fw_series: refused by the firewall (docs/phase3-network.md).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -143,5 +144,5 @@ components:
     Error:
       type: object
       properties:
-        code: { type: string, description: 'invalid_json, invalid_request, invalid_destination, invalid_sender, invalid_text, insufficient_balance, reseller_billing, account_inactive, no_rate, dlt_entity, dlt_header, dlt_template, dlt_category, dlt_promo_hours, dlt_consent, dlt_tm_chain, dlt_url, dlt_callback, throttled, unauthorized, not_found, unavailable' }
+        code: { type: string, description: 'invalid_json, invalid_request, invalid_destination, invalid_sender, invalid_text, insufficient_balance, reseller_billing, account_inactive, no_rate, dlt_entity, dlt_header, dlt_template, dlt_category, dlt_promo_hours, dlt_consent, dlt_tm_chain, dlt_url, dlt_callback, fw_sender, fw_content, fw_url, fw_destination, fw_destination_rate, fw_series, throttled, unauthorized, not_found, unavailable' }
         error: { type: string }

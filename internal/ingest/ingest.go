@@ -23,7 +23,9 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
+	"github.com/jpamaze/amazeA2pSMS/internal/firewall"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
+	"github.com/jpamaze/amazeA2pSMS/internal/network"
 	"github.com/jpamaze/amazeA2pSMS/internal/numbering"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/gsm7"
@@ -73,15 +75,17 @@ type Result struct {
 
 // Pipeline accepts messages.
 type Pipeline struct {
-	Chain   hierarchy.Chain // who pays; nil charges the sender only
-	Deals   *deals.Book     // customer deals; nil = rate cards only
-	DLT     *dlt.Checker    // India DLT; nil skips it
-	Pricer  pricing.Pricer
-	Wallets *wallet.Store
-	Store   *msgstore.Store
-	Redis   redis.UniversalClient
-	Kafka   *kgo.Client
-	Timeout time.Duration // bound for the whole accept (default 3s)
+	Chain    hierarchy.Chain    // who pays; nil charges the sender only
+	Deals    *deals.Book        // customer deals; nil = rate cards only
+	DLT      *dlt.Checker       // India DLT; nil skips it
+	Network  *network.Resolver  // MNP and number series; nil leaves 404/*
+	Firewall *firewall.Firewall // block lists and pumping limits; nil skips them
+	Pricer   pricing.Pricer
+	Wallets  *wallet.Store
+	Store    *msgstore.Store
+	Redis    redis.UniversalClient
+	Kafka    *kgo.Client
+	Timeout  time.Duration // bound for the whole accept (default 3s)
 }
 
 // Accept validates, prices, holds and enqueues one message.
@@ -121,6 +125,9 @@ func Reason(err error) string {
 	if e, ok := dlt.AsError(err); ok {
 		return string(e.Reason)
 	}
+	if e, ok := firewall.AsError(err); ok {
+		return string(e.Reason)
+	}
 	return "unavailable"
 }
 
@@ -136,6 +143,7 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := numbering.ValidateSender(req.Sender); err != nil {
 		return Result{}, err
 	}
@@ -159,6 +167,43 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 			return Result{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 		req.DLT = f
+	}
+	// Firewall rules, then one Redis round trip for both the MNP lookup and
+	// the firewall's velocity counters.
+	var vel *firewall.Velocity
+	if p.Firewall != nil {
+		if vel, err = p.Firewall.Prepare(ctx, req.AccountID, req.Sender, dest.E164, req.Text); err != nil {
+			if _, ok := firewall.AsError(err); ok {
+				return Result{}, err
+			}
+			return Result{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
+	}
+	if p.Network != nil || vel != nil {
+		var mnp *redis.StringCmd
+		_, perr := p.Redis.Pipelined(ctx, func(pl redis.Pipeliner) error {
+			if p.Network != nil {
+				mnp = p.Network.Queue(ctx, pl, dest.E164)
+			}
+			if vel != nil {
+				vel.Queue(ctx, pl)
+			}
+			return nil
+		})
+		if p.Network != nil {
+			// On a Redis error the series answer still stands; only ported
+			// numbers can be wrong, and HLR (per route) can still correct them.
+			n, _ := p.Network.Result(dest.E164, mnp)
+			dest.MCC, dest.MNC = n.MCC, n.MNC
+		}
+		if vel != nil {
+			if err := vel.Result(ctx, p.Redis); err != nil {
+				if _, ok := firewall.AsError(err); ok {
+					return Result{}, err
+				}
+				return Result{}, fmt.Errorf("%w: %v (%v)", ErrUnavailable, err, perr)
+			}
+		}
 	}
 
 	id, err := uuid.NewV7()

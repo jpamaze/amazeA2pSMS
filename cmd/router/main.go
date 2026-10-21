@@ -1,7 +1,8 @@
 // Command router picks a vendor for each accepted message and forwards it to
-// that vendor's queue. Messages with no route are rejected (status event),
-// which releases the balance hold. DLT checks, firewall and HLR/MNP lookups
-// join this step in phase 3.
+// that vendor's queue: an HLR lookup first where the route asks for one,
+// then the route, skipping vendors failover has taken out. Messages with no
+// route (or refused by HLR) are rejected (status event), which releases the
+// balance hold.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
 	"github.com/jpamaze/amazeA2pSMS/internal/routing"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 func main() {
@@ -28,28 +30,54 @@ func main() {
 			return err
 		}
 		go loader.Run(ctx, 15*time.Second)
+		go evaluateHealth(ctx, d, loader)
+		hlr, err := newHLR(d)
+		if err != nil {
+			return err
+		}
 
-		return service.ConsumeBatch(ctx, d, "router", []string{kafka.TopicSubmit}, 1000, func(ctx context.Context, recs []*kgo.Record) error {
+		return service.ConsumeBatch(ctx, d, "router", []string{kafka.TopicSubmit, kafka.TopicReroute}, 1000, func(ctx context.Context, recs []*kgo.Record) error {
 			table := loader.Table()
 			out := make([]*kgo.Record, 0, len(recs))
 			dealSegs := map[string]int64{} // routed under vendor deals in this batch
-			for _, rec := range recs {
+			msgs := make([]*domain.Message, len(recs))
+			for i, rec := range recs {
 				var m domain.Message
 				if err := json.Unmarshal(rec.Value, &m); err != nil {
 					d.Log.Error("bad submit record; skipping", "offset", rec.Offset, "err", err)
 					continue
 				}
-				dec, err := table.Choose(m.AccountID, m.MCC, m.MNC)
-				if errors.Is(err, routing.ErrNoRoute) {
+				msgs[i] = &m
+			}
+			refused := hlr.apply(ctx, table, msgs)
+			reject := func(m *domain.Message, code string) error {
+				r, err := kafka.Record(kafka.TopicStatus, m.ID, domain.StatusEvent{
+					MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, Charges: m.Charges,
+					Status: domain.StatusRejected, ErrorCode: code, At: time.Now().UTC(),
+				})
+				if err == nil {
+					out = append(out, r)
+				}
+				return err
+			}
+			for i, mp := range msgs {
+				if mp == nil {
+					continue
+				}
+				m := *mp
+				if code, ok := refused[i]; ok {
 					metrics.Routed.WithLabelValues("none").Inc()
-					r, err := kafka.Record(kafka.TopicStatus, m.ID, domain.StatusEvent{
-						MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, Charges: m.Charges,
-						Status: domain.StatusRejected, ErrorCode: "NO_ROUTE", At: time.Now().UTC(),
-					})
-					if err != nil {
+					if err := reject(&m, code); err != nil {
 						return err
 					}
-					out = append(out, r)
+					continue
+				}
+				dec, err := table.Choose(m.AccountID, m.MCC, m.MNC, m.Avoid...)
+				if errors.Is(err, routing.ErrNoRoute) {
+					metrics.Routed.WithLabelValues("none").Inc()
+					if err := reject(&m, "NO_ROUTE"); err != nil {
+						return err
+					}
 					continue
 				}
 				m.Route = &domain.Route{VendorID: dec.VendorID, Cost: dec.Cost}
@@ -74,4 +102,35 @@ func main() {
 			return nil
 		})
 	})
+}
+
+// evaluateHealth decides every two seconds which vendors are out of
+// routing and publishes the verdicts for connectors and operators.
+func evaluateHealth(ctx context.Context, d *service.Deps, loader *routing.Loader) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	prev := map[string]vendorhealth.State{}
+	if cur, err := vendorhealth.States(ctx, d.Redis); err == nil {
+		prev = cur // keep "since" and cooldowns across router restarts
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		states, err := vendorhealth.Evaluate(ctx, d.Redis, loader.Table().Policies(), prev)
+		if err != nil {
+			d.Log.Warn("vendor health not evaluated; keeping last verdicts", "err", err)
+			continue
+		}
+		for v, st := range states {
+			if p, ok := prev[v]; !ok || p.Up != st.Up || p.Reason != st.Reason {
+				d.Log.Warn("vendor routing state changed", "vendor", v, "up", st.Up, "reason", st.Reason, "detail", st.Detail)
+			}
+			metrics.VendorRoutable.WithLabelValues(v).Set(map[bool]float64{true: 1, false: 0}[st.Up])
+		}
+		loader.Health.Set(states)
+		prev = states
+	}
 }

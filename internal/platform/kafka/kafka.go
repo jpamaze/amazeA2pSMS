@@ -17,6 +17,7 @@ import (
 // Topic names. Vendor route topics are RouteTopic(vendorID).
 const (
 	TopicSubmit        = "sms.submit"         // domain.Message accepted by an edge, waiting for routing
+	TopicReroute       = "sms.reroute"        // domain.Message handed back by a connector for another route
 	TopicStatus        = "sms.status"         // domain.StatusEvent from router and connectors
 	TopicDLR           = "sms.dlr"            // domain.DLR journaled by connectors before deliver_sm_resp
 	TopicMO            = "sms.mo"             // domain.MO from vendors
@@ -30,7 +31,7 @@ func RouteTopic(vendorID string) string { return routeTopicPrefix + vendorID }
 
 // AllTopics lists every platform topic, including route topics for vendors.
 func AllTopics(vendorIDs []string) []string {
-	out := []string{TopicSubmit, TopicStatus, TopicDLR, TopicMO, TopicBillingEvents, TopicConfigChanges}
+	out := []string{TopicSubmit, TopicReroute, TopicStatus, TopicDLR, TopicMO, TopicBillingEvents, TopicConfigChanges}
 	for _, v := range vendorIDs {
 		if v = strings.TrimSpace(v); v != "" {
 			out = append(out, RouteTopic(v))

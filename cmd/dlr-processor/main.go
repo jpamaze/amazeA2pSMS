@@ -35,7 +35,7 @@ func main() {
 			return fmt.Errorf("vendor error codes: %w", err)
 		}
 		go codes.Run(ctx, time.Minute)
-		p := &dlr.Processor{Store: msgstore.New(d.Redis), Kafka: d.Kafka, Log: d.Log, Errors: codes}
+		p := &dlr.Processor{Store: msgstore.New(d.Redis), Kafka: d.Kafka, Log: d.Log, Errors: codes, Redis: d.Redis}
 		go p.Reconcile(ctx, dc.DLRTimeout, dc.ReconcileEvery)
 		return service.ConsumeBatch(ctx, d, "dlr-processor", []string{kafka.TopicStatus, kafka.TopicDLR}, 2000,
 			func(ctx context.Context, recs []*kgo.Record) error { return p.Process(ctx, recs) })

@@ -69,6 +69,7 @@ func (a *API) Handler() http.Handler {
 	a.billingRoutes(mux)
 	a.commercialRoutes(mux)
 	a.dltRoutes(mux)
+	a.networkRoutes(mux)
 	return mux
 }
 

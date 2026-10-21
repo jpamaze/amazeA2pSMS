@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -19,6 +21,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/secrets"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/pdu"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 )
 
 type connectorConfig struct {
@@ -41,13 +44,17 @@ func main() {
 		d.Log = d.Log.With("vendor", cc.VendorID)
 		c := &connector.Connector{
 			VendorID: cc.VendorID, Store: msgstore.New(d.Redis), Kafka: d.Kafka, Log: d.Log,
+			Health: &vendorhealth.Recorder{},
 		}
+		var down atomic.Bool
+		c.Down = down.Load
 		var protocol string
 		if err := d.PG.QueryRow(ctx, `SELECT protocol FROM vendors WHERE id = $1`, cc.VendorID).Scan(&protocol); err != nil {
 			return fmt.Errorf("vendor %s: %w", cc.VendorID, err)
 		}
 
 		consume := func() error {
+			go watchHealth(ctx, d, c, &down) // after c.Transport is set
 			return service.ConsumeBatch(ctx, d, "connector-"+cc.VendorID,
 				[]string{kafka.RouteTopic(cc.VendorID)}, 4*c.Transport.Window(),
 				func(ctx context.Context, recs []*kgo.Record) error { return c.Process(ctx, recs) })
@@ -81,7 +88,9 @@ func main() {
 			pool = append(pool, b)
 			go b.Run(ctx)
 		}
-		c.Transport = &connector.SMPPTransport{Pool: connector.NewPool(pool), TLVs: profile}
+		bp := connector.NewPool(pool)
+		bp.Down = down.Load
+		c.Transport = &connector.SMPPTransport{Pool: bp, TLVs: profile}
 		d.Health.Add("vendor-bind", func(context.Context) error {
 			for _, b := range pool {
 				if b.Up() {
@@ -191,4 +200,38 @@ func loadBinds(ctx context.Context, d *service.Deps, box *secrets.Box, vendorID 
 		return nil, profile, fmt.Errorf("vendor %s has no enabled binds", vendorID)
 	}
 	return out, profile, nil
+}
+
+// watchHealth publishes this instance's view of the vendor every two
+// seconds and follows the routers' failover verdict every second.
+func watchHealth(ctx context.Context, d *service.Deps, c *connector.Connector, down *atomic.Bool) {
+	host, _ := os.Hostname()
+	instance := fmt.Sprintf("%s-%d", host, os.Getpid())
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for n := 0; ; n++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if n%2 == 0 {
+			up, total := 1, 0 // HTTP vendors have no binds
+			if bc, ok := c.Transport.(interface{ Binds() (int, int) }); ok {
+				up, total = bc.Binds()
+			}
+			if err := vendorhealth.Publish(ctx, d.Redis, c.VendorID, instance, c.Health.Snapshot(up, total)); err != nil {
+				d.Log.Warn("vendor health not published", "err", err)
+			}
+		}
+		states, err := vendorhealth.States(ctx, d.Redis)
+		if err != nil {
+			continue // keep the last verdict
+		}
+		st, ok := states[c.VendorID]
+		isDown := ok && !st.Up
+		if down.Swap(isDown) != isDown {
+			d.Log.Warn("failover verdict changed; unsent messages go to other routes while down", "down", isDown, "reason", st.Reason)
+		}
+	}
 }

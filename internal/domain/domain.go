@@ -120,6 +120,8 @@ type Message struct {
 	Charges            []Charge        `json:"charges,omitempty"` // sender first, then resellers
 	AcceptedAt         time.Time       `json:"accepted_at"`
 	Route              *Route          `json:"route,omitempty"`
+	// Vendors this message failed over from; the router skips them.
+	Avoid []string `json:"avoid,omitempty"`
 }
 
 // StatusEvent is a state change emitted by the router or a connector

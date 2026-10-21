@@ -60,8 +60,12 @@ func TestFindAndReserve(t *testing.T) {
 	if d, _ := b.Find(ctx, acct, "404", "10"); d == nil || d.ID != country || d.Cap != 100 {
 		t.Fatalf("country deal (cancelled network deal ignored): %+v", d)
 	}
-	if d, _ := b.Find(ctx, acct, "405", "10"); d != nil {
+	if d, _ := b.Find(ctx, acct, "310", "10"); d != nil {
 		t.Fatalf("other country: %+v", d)
+	}
+	// MCC 405 is India too: the country-wide 404/* deal covers it.
+	if d, _ := b.Find(ctx, acct, "405", "861"); d == nil || d.ID != country {
+		t.Fatalf("405 falls back to the country deal: %+v", d)
 	}
 
 	// 30 concurrent 5-segment messages against a cap of 100: exactly 20 fit.

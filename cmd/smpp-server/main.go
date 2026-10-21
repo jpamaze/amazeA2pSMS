@@ -18,8 +18,10 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/smppserver"
+	"github.com/jpamaze/amazeA2pSMS/internal/firewall"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
+	"github.com/jpamaze/amazeA2pSMS/internal/network"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
 	"github.com/jpamaze/amazeA2pSMS/internal/smpp/pdu"
 )
@@ -41,6 +43,16 @@ func main() {
 		if err := env.Parse(&sc); err != nil {
 			return fmt.Errorf("smpp-server config: %w", err)
 		}
+		series := &network.Series{PG: d.PG, Log: d.Log}
+		if err := series.Load(ctx); err != nil {
+			return fmt.Errorf("number series: %w", err)
+		}
+		go series.Run(ctx, 5*time.Minute)
+		fw := &firewall.Firewall{PG: d.PG, Redis: d.Redis, Log: d.Log}
+		if err := fw.Load(ctx); err != nil {
+			return fmt.Errorf("firewall rules: %w", err)
+		}
+		go fw.Run(ctx, 30*time.Second)
 		if sc.NodeID == "" {
 			sc.NodeID, _ = os.Hostname()
 		}
@@ -58,14 +70,16 @@ func main() {
 
 		store := msgstore.New(d.Redis)
 		pipeline := &ingest.Pipeline{
-			Chain:   &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
-			Deals:   &deals.Book{PG: d.PG, Redis: d.Redis},
-			DLT:     &dlt.Checker{PG: d.PG, RequireChain: sc.RequireChain},
-			Pricer:  pricing.NewCached(d.PG, time.Minute),
-			Wallets: wallet.New(d.Redis),
-			Store:   store,
-			Redis:   d.Redis,
-			Kafka:   d.Kafka,
+			Chain:    &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
+			Deals:    &deals.Book{PG: d.PG, Redis: d.Redis},
+			DLT:      &dlt.Checker{PG: d.PG, RequireChain: sc.RequireChain},
+			Network:  &network.Resolver{Series: series, Redis: d.Redis},
+			Firewall: fw,
+			Pricer:   pricing.NewCached(d.PG, time.Minute),
+			Wallets:  wallet.New(d.Redis),
+			Store:    store,
+			Redis:    d.Redis,
+			Kafka:    d.Kafka,
 		}
 		srv := smppserver.New(smppserver.Config{SystemID: sc.SystemID, NodeID: sc.NodeID, DLT: tags},
 			auth.New(d.PG), pipeline, store, d.Log)

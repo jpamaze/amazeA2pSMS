@@ -19,6 +19,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
+	"github.com/jpamaze/amazeA2pSMS/internal/firewall"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 )
@@ -163,6 +164,9 @@ func statusFor(err error) (int, string) {
 		return http.StatusPaymentRequired, "reseller_billing"
 	}
 	if e, ok := dlt.AsError(err); ok {
+		return http.StatusUnprocessableEntity, string(e.Reason)
+	}
+	if e, ok := firewall.AsError(err); ok {
 		return http.StatusUnprocessableEntity, string(e.Reason)
 	}
 	return http.StatusServiceUnavailable, "unavailable"

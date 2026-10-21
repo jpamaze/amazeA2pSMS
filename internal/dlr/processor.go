@@ -12,6 +12,7 @@ import (
 
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
@@ -19,6 +20,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
 	"github.com/jpamaze/amazeA2pSMS/internal/records"
+	"github.com/jpamaze/amazeA2pSMS/internal/vendorhealth"
 	"github.com/jpamaze/amazeA2pSMS/internal/webhook"
 )
 
@@ -32,16 +34,32 @@ type Processor struct {
 	Kafka   *kgo.Client
 	Log     *slog.Logger
 	Workers int
-	Errors  *dlt.ErrorMap // vendor error codes; nil passes them through
+	Errors  *dlt.ErrorMap         // vendor error codes; nil passes them through
+	Redis   redis.UniversalClient // receipt outcomes per vendor for failover; nil = not counted
 }
 
 // outbox collects Kafka records produced while handling one batch, and the
 // messages to mark as notified once those records are acknowledged. One
 // produce per batch instead of one per message.
 type outbox struct {
-	mu    sync.Mutex
-	recs  []*kgo.Record
-	marks []string
+	mu       sync.Mutex
+	recs     []*kgo.Record
+	marks    []string
+	outcomes map[string][2]int // vendor -> [final receipts, delivered], for failover
+}
+
+func (o *outbox) outcome(vendor string, delivered bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.outcomes == nil {
+		o.outcomes = map[string][2]int{}
+	}
+	c := o.outcomes[vendor]
+	c[0]++
+	if delivered {
+		c[1]++
+	}
+	o.outcomes[vendor] = c
 }
 
 func (o *outbox) add(mark string, recs ...*kgo.Record) {
@@ -57,6 +75,12 @@ func (o *outbox) add(mark string, recs ...*kgo.Record) {
 func (p *Processor) flush(ctx context.Context, o *outbox) error {
 	if err := kafka.ProduceJSON(ctx, p.Kafka, o.recs...); err != nil {
 		return err
+	}
+	if p.Redis != nil {
+		// Only steers failover; a lost count is harmless.
+		if err := vendorhealth.CountDLRs(ctx, p.Redis, o.outcomes); err != nil {
+			p.Log.Warn("vendor receipt counts not saved", "err", err)
+		}
 	}
 	return p.Store.MarkReceiptSent(ctx, o.marks...)
 }
@@ -198,6 +222,7 @@ func (p *Processor) receipt(ctx context.Context, rec *kgo.Record, d domain.DLR, 
 	}
 	if changed {
 		metrics.Final.WithLabelValues(string(final)).Inc()
+		ob.outcome(d.VendorID, final == domain.StatusDelivered)
 	}
 	return nil, p.notify(ctx, msgID, ob)
 }

@@ -18,8 +18,10 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/dlt"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/httpapi"
+	"github.com/jpamaze/amazeA2pSMS/internal/firewall"
 	"github.com/jpamaze/amazeA2pSMS/internal/ingest"
 	"github.com/jpamaze/amazeA2pSMS/internal/msgstore"
+	"github.com/jpamaze/amazeA2pSMS/internal/network"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
 )
 
@@ -36,15 +38,27 @@ func main() {
 		if err := env.Parse(&ac); err != nil {
 			return fmt.Errorf("http-api config: %w", err)
 		}
+		series := &network.Series{PG: d.PG, Log: d.Log}
+		if err := series.Load(ctx); err != nil {
+			return fmt.Errorf("number series: %w", err)
+		}
+		go series.Run(ctx, 5*time.Minute)
+		fw := &firewall.Firewall{PG: d.PG, Redis: d.Redis, Log: d.Log}
+		if err := fw.Load(ctx); err != nil {
+			return fmt.Errorf("firewall rules: %w", err)
+		}
+		go fw.Run(ctx, 30*time.Second)
 		store := msgstore.New(d.Redis)
 		wallets := wallet.New(d.Redis)
 		api := &httpapi.API{
 			Keys: auth.New(d.PG),
 			Accept: &ingest.Pipeline{
-				Chain:  &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
-				Deals:  &deals.Book{PG: d.PG, Redis: d.Redis},
-				DLT:    &dlt.Checker{PG: d.PG, RequireChain: ac.RequireChain},
-				Pricer: pricing.NewCached(d.PG, time.Minute), Wallets: wallets,
+				Chain:    &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
+				Deals:    &deals.Book{PG: d.PG, Redis: d.Redis},
+				DLT:      &dlt.Checker{PG: d.PG, RequireChain: ac.RequireChain},
+				Network:  &network.Resolver{Series: series, Redis: d.Redis},
+				Firewall: fw,
+				Pricer:   pricing.NewCached(d.PG, time.Minute), Wallets: wallets,
 				Store: store, Redis: d.Redis, Kafka: d.Kafka,
 			},
 			Store: store, Wallets: wallets, Log: d.Log, AccountTPS: ac.AccountTPS,
