@@ -9,6 +9,7 @@ package msgstore
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -60,8 +61,18 @@ type State struct {
 	ReceiptSent        bool // the customer's final receipt or webhook was queued
 	MCC, MNC           string
 	PEID, TemplateID   string
-	VendorMsgID        string // first part's vendor ID
-	Cost               string // vendor cost for the whole message
+	VendorMsgID        string            // first part's vendor ID
+	Cost               string            // vendor cost for the whole message
+	Charges            map[string]string // account ID -> amount, every paying account
+}
+
+func chargesJSON(cs []domain.Charge) string {
+	m := make(map[string]string, len(cs))
+	for _, c := range cs {
+		m[c.AccountID] = c.Amount.String()
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
 }
 
 // Create stores a newly accepted message.
@@ -77,7 +88,8 @@ func (s *Store) Create(ctx context.Context, m *domain.Message) error {
 			"src", m.Sender, "dst", m.Destination, "segs", m.Segments, "price", m.Price.String(),
 			"status", string(domain.StatusAccepted), "reg", reg,
 			"accepted", m.AcceptedAt.UnixMilli(),
-			"mcc", m.MCC, "mnc", m.MNC, "pe", m.DLT.PEID, "tpl", m.DLT.TemplateID)
+			"mcc", m.MCC, "mnc", m.MNC, "pe", m.DLT.PEID, "tpl", m.DLT.TemplateID,
+			"chg", chargesJSON(m.Charges))
 		p.Expire(ctx, k, TTL)
 		return nil
 	})
@@ -114,7 +126,7 @@ func (s *Store) Get(ctx context.Context, id string) (State, error) {
 		RegisteredDelivery: v["reg"] == "1", AcceptedAt: ms("accepted"), DoneAt: ms("done"),
 		ReceiptSent: v["dlr_sent"] == "1",
 		MCC:         v["mcc"], MNC: v["mnc"], PEID: v["pe"], TemplateID: v["tpl"],
-		VendorMsgID: v["vmid"], Cost: v["cost"],
+		VendorMsgID: v["vmid"], Cost: v["cost"], Charges: parseCharges(v["chg"]),
 	}, nil
 }
 
@@ -261,4 +273,12 @@ func boolInt(b bool) int {
 // String is for logs.
 func (st State) String() string {
 	return fmt.Sprintf("%s[%s %s parts %d/%d ok %d]", st.ID, st.Status, st.VendorID, st.PartsDone, st.Parts, st.PartsOK)
+}
+
+func parseCharges(s string) map[string]string {
+	m := map[string]string{}
+	if s != "" {
+		_ = json.Unmarshal([]byte(s), &m)
+	}
+	return m
 }

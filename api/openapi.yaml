@@ -43,7 +43,14 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '402':
-          description: Insufficient balance (wallet + credit limit - holds < cost)
+          description: >-
+            insufficient_balance: wallet + credit limit - holds < cost.
+            reseller_billing: your reseller's wallet does not cover the message, or your reseller has no rate for this destination.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: account_inactive (your account or your reseller's account is suspended)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -133,5 +140,5 @@ components:
     Error:
       type: object
       properties:
-        code: { type: string, description: 'invalid_json, invalid_request, invalid_destination, invalid_sender, invalid_text, insufficient_balance, no_rate, throttled, unauthorized, not_found, unavailable' }
+        code: { type: string, description: 'invalid_json, invalid_request, invalid_destination, invalid_sender, invalid_text, insufficient_balance, reseller_billing, account_inactive, no_rate, throttled, unauthorized, not_found, unavailable' }
         error: { type: string }

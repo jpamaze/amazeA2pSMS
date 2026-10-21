@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jpamaze/amazeA2pSMS/internal/platform/pg"
-	"github.com/jpamaze/amazeA2pSMS/migrations"
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/pgtest"
 )
 
 // fakeIssuer serves OIDC discovery and a JWKS, and signs tokens like Keycloak.
@@ -72,30 +70,7 @@ func (f *fakeIssuer) token(t *testing.T, key *rsa.PrivateKey, claims map[string]
 	return s
 }
 
-func testDB(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	url := os.Getenv("POSTGRES_TEST_URL")
-	if url == "" {
-		url = "postgres://sms:sms@localhost:5432/sms_test?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
-	if err == nil {
-		err = pool.Ping(ctx)
-	}
-	if err != nil {
-		t.Skipf("postgres not reachable: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pg.Migrate(ctx, pool, migrations.Postgres, "postgres", slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
-		t.Fatal(err)
-	}
-	return pool
-}
+func testDB(t *testing.T) *pgxpool.Pool { return pgtest.Pool(t) }
 
 func TestOIDCSignInAndRoles(t *testing.T) {
 	pool := testDB(t)

@@ -157,6 +157,26 @@ func (s *Store) ApplyCreditLimit(ctx context.Context, accountID string, limit, d
 	return setLimitScript.Run(ctx, s.rdb, []string{walletKey(accountID)}, int64(limit), int64(dbBalance)).Err()
 }
 
+//go:embed debit.lua
+var debitSrc string
+var debitScript = redis.NewScript(debitSrc)
+
+// Debit takes amount from a wallet if its available balance covers it
+// (loading the wallet from the database values when Redis lacks it).
+func (s *Store) Debit(ctx context.Context, accountID string, amount, dbBalance, dbCreditLimit Money) (Money, error) {
+	v, err := debitScript.Run(ctx, s.rdb, []string{walletKey(accountID)},
+		int64(amount), int64(dbBalance), int64(dbCreditLimit)).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, ErrInsufficient
+	}
+	return Money(v), err
+}
+
+// Credit adds amount to a wallet already in Redis (used to undo a Debit).
+func (s *Store) Credit(ctx context.Context, accountID string, amount Money) error {
+	return s.rdb.HIncrBy(ctx, walletKey(accountID), "balance", int64(amount)).Err()
+}
+
 //go:embed topup.lua
 var topupSrc string
 var topupScript = redis.NewScript(topupSrc)

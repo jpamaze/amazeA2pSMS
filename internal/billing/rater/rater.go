@@ -49,7 +49,7 @@ type tp struct {
 
 // Process handles one batch of sms.status records.
 func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
-	// 1. Redis: settle or release every hold (idempotent).
+	// 1. Redis: settle or release every hold of every paying account (idempotent).
 	type charge struct {
 		rec   *kgo.Record
 		acct  string
@@ -62,20 +62,29 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 			r.Log.Error("bad status record; skipping", "offset", rec.Offset, "err", err)
 			continue
 		}
+		levels := ev.Charges
+		if len(levels) == 0 && ev.HoldID != "" { // events from before multi-level charging
+			levels = []domain.Charge{{AccountID: ev.AccountID, HoldID: ev.HoldID, Amount: ev.Price}}
+		}
 		switch {
 		case charged(ev):
-			if ev.HoldID != "" {
-				_, err := r.Wallets.Settle(ctx, ev.AccountID, ev.HoldID, wallet.FromDecimal(ev.Price))
-				if err != nil && !errors.Is(err, wallet.ErrUnknownHold) {
-					return err
+			for _, l := range levels {
+				if l.HoldID != "" && l.Amount.IsPositive() {
+					_, err := r.Wallets.Settle(ctx, l.AccountID, l.HoldID, wallet.FromDecimal(l.Amount))
+					if err != nil && !errors.Is(err, wallet.ErrUnknownHold) {
+						return err
+					}
+				}
+				if l.Amount.IsPositive() {
+					charges = append(charges, charge{rec: rec, acct: l.AccountID, price: l.Amount})
 				}
 			}
-			if ev.Price.IsPositive() {
-				charges = append(charges, charge{rec: rec, acct: ev.AccountID, price: ev.Price})
-			}
 		case released(ev):
-			if ev.HoldID != "" {
-				if err := r.Wallets.Release(ctx, ev.AccountID, ev.HoldID); err != nil && !errors.Is(err, wallet.ErrUnknownHold) {
+			for _, l := range levels {
+				if l.HoldID == "" || !l.Amount.IsPositive() {
+					continue
+				}
+				if err := r.Wallets.Release(ctx, l.AccountID, l.HoldID); err != nil && !errors.Is(err, wallet.ErrUnknownHold) {
 					return err
 				}
 			}
@@ -102,7 +111,7 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 		}
 
 		sums := map[string]decimal.Decimal{}
-		counts := map[string]int{}
+		counts := map[string]int{} // messages charged per account
 		for _, c := range charges {
 			if c.rec.Offset <= last[tp{c.rec.Topic, c.rec.Partition}] {
 				continue // already booked by an earlier run of this batch
@@ -118,9 +127,9 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 				return fmt.Errorf("rater: debit %s: %w", acct, err)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO ledger_entries
-				(account_id, kind, amount, balance_after, reference, idempotency_key, created_by)
-				VALUES ($1, 'charge', $2, $3, $4, $5, 'rater')`,
-				acct, sum.Neg(), bal, fmt.Sprintf("%d messages", counts[acct]), "rater:"+batch+":"+acct); err != nil {
+				(account_id, kind, amount, balance_after, reference, idempotency_key, created_by, quantity)
+				VALUES ($1, 'charge', $2, $3, $4, $5, 'rater', $6)`,
+				acct, sum.Neg(), bal, fmt.Sprintf("%d messages", counts[acct]), "rater:"+batch+":"+acct, counts[acct]); err != nil {
 				return err
 			}
 		}

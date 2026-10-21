@@ -156,6 +156,10 @@ func statusFor(err error) (int, string) {
 		return http.StatusPaymentRequired, "insufficient_balance"
 	case errors.Is(err, ingest.ErrNoPrice):
 		return http.StatusUnprocessableEntity, "no_rate"
+	case errors.Is(err, ingest.ErrInactive):
+		return http.StatusForbidden, "account_inactive"
+	case errors.Is(err, ingest.ErrResellerBalance), errors.Is(err, ingest.ErrResellerNoPrice):
+		return http.StatusPaymentRequired, "reseller_billing"
 	}
 	return http.StatusServiceUnavailable, "unavailable"
 }

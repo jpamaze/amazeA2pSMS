@@ -12,6 +12,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/httpapi"
@@ -36,6 +37,7 @@ func main() {
 		api := &httpapi.API{
 			Keys: auth.New(d.PG),
 			Accept: &ingest.Pipeline{
+				Chain:  &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
 				Pricer: pricing.NewCached(d.PG, time.Minute), Wallets: wallets,
 				Store: store, Redis: d.Redis, Kafka: d.Kafka,
 			},

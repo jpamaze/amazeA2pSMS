@@ -41,7 +41,7 @@ func main() {
 				if errors.Is(err, routing.ErrNoRoute) {
 					metrics.Routed.WithLabelValues("none").Inc()
 					r, err := kafka.Record(kafka.TopicStatus, m.ID, domain.StatusEvent{
-						MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price,
+						MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, Charges: m.Charges,
 						Status: domain.StatusRejected, ErrorCode: "NO_ROUTE", At: time.Now().UTC(),
 					})
 					if err != nil {

@@ -150,12 +150,8 @@ func (s *Session) closeWith(err error) {
 		s.err = err
 		close(s.closed)
 		s.conn.Close()
-		s.pendMu.Lock()
-		for seq, ch := range s.pending {
-			close(ch)
-			delete(s.pending, seq)
-		}
-		s.pendMu.Unlock()
+		// Pending Sends see s.closed; their channels are never closed, so the
+		// read loop can still deliver into them without racing.
 		if s.cfg.OnClose != nil {
 			go s.cfg.OnClose(s, err)
 		}
@@ -230,14 +226,22 @@ func (s *Session) Send(ctx context.Context, commandID uint32, body pdu.Body) (*p
 	timer := time.NewTimer(s.cfg.ResponseTimeout)
 	defer timer.Stop()
 	select {
-	case resp, ok := <-ch:
-		if !ok {
-			return nil, ErrClosed
-		}
+	case resp := <-ch:
 		if resp.CommandID == pdu.GenericNack || resp.Status != pdu.StatusOK {
 			return resp, &StatusError{CommandID: commandID, Status: resp.Status}
 		}
 		return resp, nil
+	case <-s.closed:
+		// A response may have arrived just before the close.
+		select {
+		case resp := <-ch:
+			if resp.CommandID == pdu.GenericNack || resp.Status != pdu.StatusOK {
+				return resp, &StatusError{CommandID: commandID, Status: resp.Status}
+			}
+			return resp, nil
+		default:
+			return nil, ErrClosed
+		}
 	case <-timer.C:
 		return nil, ErrTimeout
 	case <-ctx.Done():

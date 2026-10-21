@@ -119,7 +119,7 @@ func (c *Connector) Process(ctx context.Context, recs []*kgo.Record) error {
 
 func (c *Connector) send(ctx context.Context, m *domain.Message, sentTo string) *domain.StatusEvent {
 	ev := &domain.StatusEvent{
-		MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, VendorID: c.VendorID,
+		MessageID: m.ID, AccountID: m.AccountID, HoldID: m.HoldID, Price: m.Price, Charges: m.Charges, VendorID: c.VendorID,
 	}
 	// A replayed record (connector restarted after sending but before its
 	// offset was committed) is not sent twice.

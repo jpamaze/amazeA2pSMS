@@ -22,4 +22,6 @@ covers the message cost. Every new account starts with a credit limit of **0**, 
 
 Amounts are stored with 4 decimal places (`numeric(18,4)` in PostgreSQL, int64 units of 1/10,000 in Redis).
 
-Redis is the hot copy that holds go through. PostgreSQL is the system of record: the rater settles into `ledger_entries` in batches (phase 2).
+Redis is the hot copy that holds go through. PostgreSQL is the system of record: the rater settles into `ledger_entries` in batches.
+
+Resellers have their own wallet, charged at the platform's price for every message their sub-accounts send, and fund sub-accounts by transfer. See [phase2-billing.md](phase2-billing.md).

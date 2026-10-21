@@ -17,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
@@ -35,6 +36,12 @@ var (
 	ErrNoPrice            = pricing.ErrNoPrice
 	ErrInsufficient       = wallet.ErrInsufficient
 	ErrUnavailable        = errors.New("ingest: temporarily unavailable")
+	// ErrResellerBalance means the sender can pay but its reseller cannot.
+	ErrResellerBalance = errors.New("ingest: reseller balance does not cover the message")
+	// ErrResellerNoPrice means the reseller has no rate for the destination.
+	ErrResellerNoPrice = errors.New("ingest: reseller has no rate for destination")
+	// ErrInactive means the account or its reseller is suspended.
+	ErrInactive = hierarchy.ErrInactive
 )
 
 // MaxSegments caps one message.
@@ -64,6 +71,7 @@ type Result struct {
 
 // Pipeline accepts messages.
 type Pipeline struct {
+	Chain   hierarchy.Chain // who pays; nil charges the sender only
 	Pricer  pricing.Pricer
 	Wallets *wallet.Store
 	Store   *msgstore.Store
@@ -99,6 +107,12 @@ func Reason(err error) string {
 		return "no_rate"
 	case errors.Is(err, ErrInsufficient):
 		return "insufficient_balance"
+	case errors.Is(err, ErrResellerBalance):
+		return "reseller_balance"
+	case errors.Is(err, ErrResellerNoPrice):
+		return "reseller_no_rate"
+	case errors.Is(err, ErrInactive):
+		return "account_inactive"
 	}
 	return "unavailable"
 }
@@ -147,13 +161,12 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	// fail undoes everything done so far, so the customer can safely retry.
-	held := false
-	var holdID string
+	var held []domain.Charge
 	fail := func(err error) (Result, error) {
 		bg, c := context.WithTimeout(context.Background(), time.Second)
 		defer c()
-		if held {
-			_ = p.Wallets.Release(bg, req.AccountID, holdID)
+		for _, h := range held {
+			_ = p.Wallets.Release(bg, h.AccountID, h.HoldID)
 		}
 		_ = p.Store.Delete(bg, msgID)
 		if idemKey != "" {
@@ -162,32 +175,57 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
-	unit, err := p.Pricer.Price(ctx, req.AccountID, dest.MCC, dest.MNC, "*")
-	if err != nil {
-		if errors.Is(err, pricing.ErrNoPrice) {
-			return fail(err)
+	chain := []string{req.AccountID}
+	if p.Chain != nil {
+		if chain, err = p.Chain.Chain(ctx, req.AccountID); err != nil {
+			if errors.Is(err, hierarchy.ErrInactive) {
+				return fail(err)
+			}
+			return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
 		}
-		return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
 	}
-	price := unit.Mul(decimal.NewFromInt(int64(segments)))
+	// Each paying account is priced by its own rate card: the sender at the
+	// price its reseller set, each reseller at the price charged to it.
+	charges := make([]domain.Charge, 0, len(chain))
+	for i, acct := range chain {
+		unit, err := p.Pricer.Price(ctx, acct, dest.MCC, dest.MNC, "*")
+		if err != nil {
+			switch {
+			case errors.Is(err, pricing.ErrNoPrice) && i == 0:
+				return fail(err)
+			case errors.Is(err, pricing.ErrNoPrice):
+				return fail(ErrResellerNoPrice)
+			}
+			return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
+		}
+		charges = append(charges, domain.Charge{AccountID: acct, HoldID: msgID, Amount: unit.Mul(decimal.NewFromInt(int64(segments)))})
+	}
+	price := charges[0].Amount
 
 	m := &domain.Message{
 		ID: msgID, AccountID: req.AccountID, ClientRef: req.ClientRef, Channel: req.Channel,
 		Sender: req.Sender, Destination: dest.E164, MCC: dest.MCC, MNC: dest.MNC,
 		Text: req.Text, UDH: req.UDH, Segments: segments, DLT: req.DLT,
-		RegisteredDelivery: req.RegisteredDelivery, Price: price, AcceptedAt: time.Now().UTC(),
+		RegisteredDelivery: req.RegisteredDelivery, Price: price, Charges: charges, AcceptedAt: time.Now().UTC(),
 	}
 
-	if price.IsPositive() {
-		holdID = msgID
-		m.HoldID = holdID
-		if err := p.Wallets.Hold(ctx, req.AccountID, holdID, wallet.FromDecimal(price)); err != nil {
-			if errors.Is(err, wallet.ErrInsufficient) {
+	for i, ch := range charges {
+		if !ch.Amount.IsPositive() {
+			continue
+		}
+		if err := p.Wallets.Hold(ctx, ch.AccountID, ch.HoldID, wallet.FromDecimal(ch.Amount)); err != nil {
+			switch {
+			case errors.Is(err, wallet.ErrInsufficient) && i == 0:
 				return fail(err)
+			case errors.Is(err, wallet.ErrInsufficient):
+				return fail(ErrResellerBalance)
 			}
 			return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
 		}
-		held = true
+		held = append(held, ch)
+		if i == 0 {
+			m.HoldID = ch.HoldID
+		}
 	}
 
 	if err := p.Store.Create(ctx, m); err != nil {

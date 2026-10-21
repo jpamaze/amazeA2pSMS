@@ -15,6 +15,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/edge/adminapi"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/secrets"
+	"github.com/jpamaze/amazeA2pSMS/internal/records"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
 )
 
@@ -27,6 +28,11 @@ type adminConfig struct {
 	OIDCAudience string `env:"OIDC_AUDIENCE" envDefault:"amaze-admin"`
 	// Optional: fetch discovery here when it differs from the issuer URL.
 	OIDCDiscovery string `env:"OIDC_DISCOVERY_URL"`
+	// Optional: usage reports read ClickHouse.
+	CHURL      string `env:"CLICKHOUSE_URL"`
+	CHDB       string `env:"CLICKHOUSE_DB" envDefault:"sms"`
+	CHUser     string `env:"CLICKHOUSE_USER" envDefault:"sms"`
+	CHPassword string `env:"CLICKHOUSE_PASSWORD" envDefault:"sms"`
 }
 
 func main() {
@@ -69,6 +75,9 @@ func main() {
 			Credits:  credit.New(d.PG, wallets),
 			Ledger:   &ledger.Service{PG: d.PG, Wallets: wallets},
 			Resolver: resolver,
+		}
+		if ac.CHURL != "" {
+			api.CH = &records.ClickHouse{URL: ac.CHURL, Database: ac.CHDB, User: ac.CHUser, Password: ac.CHPassword}
 		}
 		d.Log.Info("admin api listening", "addr", ac.Addr)
 		return service.ServeHTTP(ctx, &http.Server{

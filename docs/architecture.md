@@ -25,7 +25,7 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 | --- | --- | --- | --- |
 | smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices) |
 | http-api | REST | `sms.submit` | Redis, PG |
-| admin-api | REST | — | PG, Redis |
+| admin-api | REST | — | PG, Redis, ClickHouse (usage reports) |
 | router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, refreshed from PG |
 | connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
 | dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis |
@@ -39,7 +39,7 @@ Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, ho
 
 Final receipts (deliver_sm or webhook) and the ClickHouse row are queued before the message is marked notified, so a crash repeats rather than loses them; customers should treat receipts and webhooks as at-least-once and de-duplicate by message ID.
 
-Billing: the customer is charged when the vendor accepts a message (`submitted`, or `failed` after at least one part was accepted) and the hold is released when the platform rejects it or no part was accepted.
+Billing: every account in the sender's chain below the platform is charged (two-level wallets; see [phase2-billing.md](phase2-billing.md)). Each is charged when the vendor accepts a message (`submitted`, or `failed` after at least one part was accepted) and the hold is released when the platform rejects it or no part was accepted.
 
 ## Reliability rules
 

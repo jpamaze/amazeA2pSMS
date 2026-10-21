@@ -104,10 +104,12 @@ func main() {
 	}
 	rows.Close()
 	ts := from.UTC().Format("2006-01-02 15:04:05")
-	chRows, err := ch.Query(ctx, fmt.Sprintf(`SELECT toString(account_id), toString(sum(price)), count()
+	// Every paying account (sender and resellers) per the charges map.
+	chRows, err := ch.Query(ctx, fmt.Sprintf(`SELECT acct, toString(sum(amount)), count()
 		FROM message_records FINAL
+		ARRAY JOIN mapKeys(charges) AS acct, mapValues(charges) AS amount
 		WHERE accepted_at >= '%s' AND vendor_id != '' AND status IN ('submitted','delivered','failed','expired')
-		GROUP BY account_id`, ts))
+		GROUP BY acct`, ts))
 	if err != nil {
 		fatal(err)
 	}
@@ -129,7 +131,7 @@ func main() {
 			billDiff = append(billDiff, fmt.Sprintf("%s ledger %s vs records 0", a, v.StringFixed(4)))
 		}
 	}
-	check("ledger charges = ClickHouse charged messages", len(billDiff) == 0,
+	check("ledger charges = ClickHouse charges, per account", len(billDiff) == 0,
 		fmt.Sprintf("%d charged messages; %s", charged, strings.Join(first(billDiff, 5), "; ")))
 
 	// 4: nothing stuck.

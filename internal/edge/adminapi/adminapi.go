@@ -27,6 +27,7 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/ledger"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/secrets"
+	"github.com/jpamaze/amazeA2pSMS/internal/records"
 )
 
 // API is the admin HTTP API.
@@ -38,6 +39,7 @@ type API struct {
 	Secrets  *secrets.Box
 	Log      *slog.Logger
 	Resolver Resolver
+	CH       *records.ClickHouse // usage reports; optional
 }
 
 type actor struct {
@@ -62,6 +64,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /v1/accounts/{id}/webhook", a.authed(PermAdmin, a.setWebhook))
 	mux.Handle("PUT /v1/accounts/{id}/rate-card", a.authed(PermAdmin, a.setRateCard))
 	mux.Handle("GET /v1/rate-cards", a.authed(PermRead, a.listRateCards))
+	a.billingRoutes(mux)
 	return mux
 }
 
@@ -224,6 +227,12 @@ func (a *API) createAccount(w http.ResponseWriter, r *http.Request, act actor) {
 	if act.Role == "customer" {
 		writeErr(w, http.StatusForbidden, "customers cannot create accounts")
 		return
+	}
+	if req.RateCardID != "" && parent == act.AccountID {
+		if owns, err := a.ownsCard(r.Context(), act, req.RateCardID); err != nil || !owns {
+			writeErr(w, http.StatusBadRequest, "rate card not found among yours")
+			return
+		}
 	}
 	var id string
 	var rateCard *string
@@ -473,6 +482,10 @@ func (a *API) setRateCard(w http.ResponseWriter, r *http.Request, act actor) {
 	if !decode(w, r, &req) {
 		return
 	}
+	if owns, err := a.ownsCard(r.Context(), act, req.RateCardID); err != nil || !owns {
+		writeErr(w, http.StatusBadRequest, "rate card not found among yours")
+		return
+	}
 	tag, err := a.PG.Exec(r.Context(), `UPDATE accounts SET rate_card_id = $2 WHERE id = $1`, id, req.RateCardID)
 	if err != nil {
 		writeDBErr(w, err)
@@ -491,7 +504,8 @@ func (a *API) listRateCards(w http.ResponseWriter, r *http.Request, act actor) {
 		writeErr(w, http.StatusForbidden, "not allowed")
 		return
 	}
-	rows, err := a.PG.Query(r.Context(), `SELECT id, name, currency FROM rate_cards ORDER BY name`)
+	rows, err := a.PG.Query(r.Context(), `SELECT id, name, currency FROM rate_cards
+		WHERE owner_account_id IS NOT DISTINCT FROM $1 ORDER BY name`, cardOwner(act))
 	if err != nil {
 		writeDBErr(w, err)
 		return

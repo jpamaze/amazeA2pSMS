@@ -30,6 +30,8 @@ import (
 const (
 	StatusInsufficientBalance uint32 = 0x00000401
 	StatusNoPrice             uint32 = 0x00000402
+	StatusAccountInactive     uint32 = 0x00000403 // account or its reseller suspended
+	StatusResellerBilling     uint32 = 0x00000404 // reseller balance or rate missing
 )
 
 // DLTTags says which TLVs carry India DLT fields on customer submit_sm.
@@ -365,6 +367,10 @@ func statusFor(err error) uint32 {
 		return StatusInsufficientBalance
 	case errors.Is(err, ingest.ErrNoPrice):
 		return StatusNoPrice
+	case errors.Is(err, ingest.ErrInactive):
+		return StatusAccountInactive
+	case errors.Is(err, ingest.ErrResellerBalance), errors.Is(err, ingest.ErrResellerNoPrice):
+		return StatusResellerBilling
 	case errors.Is(err, ingest.ErrUnavailable):
 		return pdu.StatusMsgQFul // temporary: the customer should retry
 	}

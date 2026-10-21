@@ -81,6 +81,14 @@ type DLTFields struct {
 	TMChain    string `json:"tm_chain,omitempty"`
 }
 
+// Charge is what one account pays for a message: the sender at its own
+// price, and each reseller above it at the price the level above charges it.
+type Charge struct {
+	AccountID string          `json:"account_id"`
+	HoldID    string          `json:"hold_id"`
+	Amount    decimal.Decimal `json:"amount"`
+}
+
 // Route is the routing decision attached by the router.
 type Route struct {
 	VendorID string          `json:"vendor_id"`
@@ -103,7 +111,8 @@ type Message struct {
 	DLT                DLTFields       `json:"dlt"`
 	RegisteredDelivery bool            `json:"registered_delivery"`
 	HoldID             string          `json:"hold_id,omitempty"`
-	Price              decimal.Decimal `json:"price"` // total charged to the customer
+	Price              decimal.Decimal `json:"price"`             // total charged to the sending account
+	Charges            []Charge        `json:"charges,omitempty"` // sender first, then resellers
 	AcceptedAt         time.Time       `json:"accepted_at"`
 	Route              *Route          `json:"route,omitempty"`
 }
@@ -116,6 +125,7 @@ type StatusEvent struct {
 	AccountID    string          `json:"account_id"`
 	HoldID       string          `json:"hold_id,omitempty"`
 	Price        decimal.Decimal `json:"price"`
+	Charges      []Charge        `json:"charges,omitempty"`
 	Status       MessageStatus   `json:"status"`
 	VendorID     string          `json:"vendor_id,omitempty"`
 	VendorMsgIDs []string        `json:"vendor_msg_ids,omitempty"`

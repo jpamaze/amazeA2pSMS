@@ -3,48 +3,15 @@ package credit
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
-	"github.com/jpamaze/amazeA2pSMS/internal/platform/pg"
-	"github.com/jpamaze/amazeA2pSMS/migrations"
+	"github.com/jpamaze/amazeA2pSMS/internal/platform/pgtest"
 )
 
-// testPool resets POSTGRES_TEST_URL (default: local sms_test database),
-// applies all migrations and skips when no database is reachable.
-// The database is wiped: never point this at real data.
-func testPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	url := os.Getenv("POSTGRES_TEST_URL")
-	if url == "" {
-		url = "postgres://sms:sms@localhost:5432/sms_test?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
-	if err == nil {
-		err = pool.Ping(ctx)
-	}
-	if err != nil {
-		t.Skipf("postgres not reachable: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := pg.Migrate(ctx, pool, migrations.Postgres, "postgres", log); err != nil {
-		t.Fatal(err)
-	}
-	return pool
-}
+func testPool(t *testing.T) *pgxpool.Pool { return pgtest.Pool(t) }
 
 func newAccount(t *testing.T, pool *pgxpool.Pool, parent *string, role, name string) string {
 	t.Helper()

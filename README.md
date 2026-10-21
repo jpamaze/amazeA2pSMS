@@ -24,6 +24,7 @@ Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: cu
 | `internal/ingest`, `internal/msgstore`, `internal/routing`, `internal/connector`, `internal/dlr` | Message path packages |
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
 | `internal/billing/credit` | Credit limit changes (platform: any account; reseller: own sub-accounts within its balance) |
+| `internal/billing/hierarchy`, `internal/billing/ledger` | Reseller chain for two-level charging; top-ups and reseller-to-sub-account transfers ([docs/phase2-billing.md](docs/phase2-billing.md)) |
 | `internal/platform/*` | Config, logging, health, metrics, Kafka, Redis, PostgreSQL |
 | `migrations/` | PostgreSQL (tenancy, wallet, DLT, routing) and ClickHouse schemas |
 | `api/openapi.yaml` | Customer HTTP API contract |
@@ -92,4 +93,4 @@ The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` 
 
 ## Next
 
-Run the 5,000 TPS sign-off on VMs ([docs/signoff-5k.md](docs/signoff-5k.md)); phase 2 (billing and commercial, [docs/phase2-billing.md](docs/phase2-billing.md)); then phase 3 (DLT template matching, firewall, HLR/MNP, vendor failover).
+Run the 5,000 TPS sign-off on VMs ([docs/signoff-5k.md](docs/signoff-5k.md)). Phase 2 slice 1 (reseller billing, rate cards, transfers, statements and usage, [docs/phase2-billing.md](docs/phase2-billing.md)) is done; slice 2 is deals and disputes. Then phase 3 (DLT template matching, firewall, HLR/MNP, vendor failover).

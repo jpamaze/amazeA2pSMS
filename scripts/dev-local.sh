@@ -78,7 +78,7 @@ up)
   "$B/devseed" -route "${ROUTE:-sim}" ${SEED_ARGS:-} | tee "$L/seed.log"
   start smpp-server   OPS_ADDR=:9101 "$B/smpp-server"
   start http-api      OPS_ADDR=:9102 "$B/http-api"
-  start admin-api     OPS_ADDR=:9103 "$B/admin-api"
+  start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="${CHDB_PYTHON:+http://localhost:8123}" "$B/admin-api"
   start router        OPS_ADDR=:9104 "$B/router"
   start rater         OPS_ADDR=:9105 "$B/rater"
   start dlr-processor OPS_ADDR=:9106 DLR_TIMEOUT="${DLR_TIMEOUT:-72h}" "$B/dlr-processor"

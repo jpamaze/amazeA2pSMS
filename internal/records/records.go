@@ -32,26 +32,27 @@ const Topic = "sms.records"
 
 // Row is one message_records row (JSONEachRow field names = column names).
 type Row struct {
-	MessageID   string  `json:"message_id"`
-	AccountID   string  `json:"account_id"`
-	Channel     string  `json:"channel"`
-	ClientRef   string  `json:"client_ref"`
-	Sender      string  `json:"sender"`
-	Destination string  `json:"destination"`
-	MCC         string  `json:"mcc"`
-	MNC         string  `json:"mnc"`
-	Segments    int     `json:"segments"`
-	PEID        string  `json:"pe_id"`
-	TemplateID  string  `json:"template_id"`
-	VendorID    string  `json:"vendor_id"`
-	VendorMsgID string  `json:"vendor_msg_id"`
-	Status      string  `json:"status"`
-	ErrorCode   string  `json:"error_code"`
-	Price       string  `json:"price"`
-	Cost        string  `json:"cost"`
-	AcceptedAt  string  `json:"accepted_at"`
-	DoneAt      *string `json:"done_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	MessageID   string            `json:"message_id"`
+	AccountID   string            `json:"account_id"`
+	Channel     string            `json:"channel"`
+	ClientRef   string            `json:"client_ref"`
+	Sender      string            `json:"sender"`
+	Destination string            `json:"destination"`
+	MCC         string            `json:"mcc"`
+	MNC         string            `json:"mnc"`
+	Segments    int               `json:"segments"`
+	PEID        string            `json:"pe_id"`
+	TemplateID  string            `json:"template_id"`
+	VendorID    string            `json:"vendor_id"`
+	VendorMsgID string            `json:"vendor_msg_id"`
+	Status      string            `json:"status"`
+	ErrorCode   string            `json:"error_code"`
+	Price       string            `json:"price"`
+	Cost        string            `json:"cost"`
+	AcceptedAt  string            `json:"accepted_at"`
+	DoneAt      *string           `json:"done_at"`
+	UpdatedAt   string            `json:"updated_at"`
+	Charges     map[string]string `json:"charges"` // account ID -> amount charged
 }
 
 const tsLayout = "2006-01-02 15:04:05.000"
@@ -73,7 +74,16 @@ func FromMessage(m *domain.Message) Row {
 		PEID: m.DLT.PEID, TemplateID: m.DLT.TemplateID, Status: string(domain.StatusAccepted),
 		Price: orZero(m.Price.String()), Cost: "0",
 		AcceptedAt: ts(m.AcceptedAt), UpdatedAt: ts(m.AcceptedAt),
+		Charges: chargeMap(m.Charges),
 	}
+}
+
+func chargeMap(cs []domain.Charge) map[string]string {
+	m := make(map[string]string, len(cs))
+	for _, c := range cs {
+		m[c.AccountID] = c.Amount.String()
+	}
+	return m
 }
 
 // FromState is the row written when a message reaches its final status.
@@ -83,7 +93,7 @@ func FromState(st msgstore.State) Row {
 		Sender: st.Sender, Destination: st.Destination, MCC: st.MCC, MNC: st.MNC, Segments: st.Segments,
 		PEID: st.PEID, TemplateID: st.TemplateID, VendorID: st.VendorID, VendorMsgID: st.VendorMsgID,
 		Status: string(st.Status), ErrorCode: st.ErrorCode, Price: orZero(st.Price), Cost: orZero(st.Cost),
-		AcceptedAt: ts(st.AcceptedAt), UpdatedAt: ts(time.Now()),
+		AcceptedAt: ts(st.AcceptedAt), UpdatedAt: ts(time.Now()), Charges: st.Charges,
 	}
 	if !st.DoneAt.IsZero() {
 		d := ts(st.DoneAt)
