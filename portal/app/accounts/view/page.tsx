@@ -9,7 +9,7 @@ import { can, useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
 import type { AccountRow } from "@/components/AccountPicker";
 import { ApiKeys, SmppCredentials, Users, Webhook } from "@/components/AccountAdmin";
-import { Shell } from "@/components/Shell";
+import { Gate, Shell } from "@/components/Shell";
 import { Badge, Button, Card, Field, Loading, Notice, Select, Stat, Tabs, useAction } from "@/components/ui";
 
 function View() {
@@ -91,5 +91,5 @@ function RateCard({ id, done }: { id: string; done: () => void }) {
 }
 
 export default function Page() {
-  return <Suspense fallback={<Loading />}><View /></Suspense>;
+  return <Gate roles={["platform", "reseller"]} title="Account"><Suspense fallback={<Loading />}><View /></Suspense></Gate>;
 }

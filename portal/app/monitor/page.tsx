@@ -3,7 +3,7 @@
 import { get } from "@/lib/api";
 import { useData, useInterval } from "@/lib/use";
 import { LineChart } from "@/components/Chart";
-import { Shell } from "@/components/Shell";
+import { Gate, Shell } from "@/components/Shell";
 import { Badge, Card, Loading, Notice, Stat, Table } from "@/components/ui";
 
 type S = { labels: Record<string, string>; points: [number, number][] };
@@ -14,7 +14,7 @@ const pts = (s?: S[]) => (s?.[0]?.points ?? []).map(([t, v]) => [t * 1000, v] as
 const fmt = (v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
 const palette = ["#1f6feb", "#8250df", "#bf8700", "#1a7f37", "#cf222e", "#0a7c86"];
 
-export default function Monitor() {
+function Monitor() {
   const { data, error, loading, reload } = useData(() => get<Live>("/v1/monitor/live"), []);
   useInterval(reload, 10000);
   const vendors = new Set<string>();
@@ -72,4 +72,8 @@ export default function Monitor() {
       )}
     </Shell>
   );
+}
+
+export default function Page() {
+  return <Gate roles={["platform"]} title="Live monitor"><Monitor /></Gate>;
 }

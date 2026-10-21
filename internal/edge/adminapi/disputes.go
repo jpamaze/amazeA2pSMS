@@ -83,6 +83,7 @@ func (a *API) raiseDispute(w http.ResponseWriter, r *http.Request, act actor) {
 type dispute struct {
 	ID             string           `json:"id"`
 	AccountID      string           `json:"account_id"`
+	AccountName    string           `json:"account_name"`
 	ResolverID     *string          `json:"resolver_id"`
 	From           time.Time        `json:"from"`
 	To             time.Time        `json:"to"`
@@ -98,12 +99,12 @@ type dispute struct {
 	ResolvedAt     *time.Time       `json:"resolved_at,omitempty"`
 }
 
-const disputeCols = `id, account_id, resolver_id::text, period_from, period_to, message_ids::text[], claimed_amount, reason,
+const disputeCols = `id, account_id, (SELECT x.name FROM accounts x WHERE x.id = account_id), resolver_id::text, period_from, period_to, message_ids::text[], claimed_amount, reason,
 	status, approved_amount, resolution, raised_by, resolved_by, created_at, resolved_at`
 
 func scanDispute(row pgx.Row) (dispute, error) {
 	var d dispute
-	err := row.Scan(&d.ID, &d.AccountID, &d.ResolverID, &d.From, &d.To, &d.MessageIDs, &d.ClaimedAmount, &d.Reason,
+	err := row.Scan(&d.ID, &d.AccountID, &d.AccountName, &d.ResolverID, &d.From, &d.To, &d.MessageIDs, &d.ClaimedAmount, &d.Reason,
 		&d.Status, &d.ApprovedAmount, &d.Resolution, &d.RaisedBy, &d.ResolvedBy, &d.CreatedAt, &d.ResolvedAt)
 	return d, err
 }
@@ -351,7 +352,9 @@ func (a *API) importVendorInvoice(w http.ResponseWriter, r *http.Request, act ac
 		writeDBErr(w, err)
 		return
 	}
-	res, ok := a.reconcile(w, r, id, decimal.RequireFromString("0.5"))
+	// The invoice is stored either way; a failed reconciliation (e.g. no
+	// ClickHouse) must not write its own error response here.
+	res, ok := a.reconcile(discardWriter{}, r, id, decimal.RequireFromString("0.5"))
 	if !ok {
 		writeJSON(w, http.StatusCreated, map[string]any{"id": id, "lines": len(lines), "reconciliation": "unavailable"})
 		return
@@ -636,3 +639,10 @@ func (a *API) updateVendorDispute(w http.ResponseWriter, r *http.Request, act ac
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": req.Status})
 }
+
+// discardWriter drops a response a helper would write.
+type discardWriter struct{}
+
+func (discardWriter) Header() http.Header         { return http.Header{} }
+func (discardWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (discardWriter) WriteHeader(int)             {}

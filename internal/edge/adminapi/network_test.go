@@ -57,7 +57,7 @@ func TestNetworkAdmin(t *testing.T) {
 		{plat, "GET", "/v1/vendors/health", ``, 200},
 		{plat, "POST", "/v1/number-series/import", "prefix,mcc,mnc,operator,circle\n98100,404,45,Airtel,Delhi\n7012,405,861,Jio,Kerala\n", 200},
 		{plat, "POST", "/v1/number-series/import", "98,4041,10\n", 400},
-		{plat, "GET", "/v1/numbers/9810012345", ``, 200},
+		{plat, "GET", "/v1/numbers/9810077777", ``, 200},
 		{plat, "GET", "/v1/numbers/12345", ``, 400},
 		{plat, "POST", "/v1/firewall/rules", `{"kind":"content","pattern":"re:("}`, 400},
 		{plat, "POST", "/v1/firewall/rules", `{"kind":"url","pattern":"evil.in","note":"phishing"}`, 201},
@@ -75,8 +75,8 @@ func TestNetworkAdmin(t *testing.T) {
 			t.Fatalf("%s %s %s: want %d, got %d %v", s.method, s.path, s.body, s.want, code, out)
 		}
 	}
-	_, out := call(plat, "GET", "/v1/numbers/9810012345", "")
-	if res := out.(map[string]any)["resolved"].(map[string]any); res["MNC"] != "45" || res["Source"] != "series" {
+	_, out := call(plat, "GET", "/v1/numbers/9810077777", "")
+	if res := out.(map[string]any)["resolved"].(map[string]any); res["mnc"] != "45" || res["source"] != "series" {
 		t.Fatalf("number info: %v", out)
 	}
 	var dest, series, block int

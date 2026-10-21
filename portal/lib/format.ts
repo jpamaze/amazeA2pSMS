@@ -18,3 +18,12 @@ export function istDate(offsetDays = 0): string {
   const d = new Date(Date.now() + offsetDays * 86400000);
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(d);
 }
+
+// istStart is the start of an IST day (YYYY-MM-DD) as RFC 3339; istEnd is
+// the start of the next day, so a from/to pair covers whole days.
+export const istStart = (day: string) => `${day}T00:00:00+05:30`;
+export function istEnd(day: string): string {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return istStart(d.toISOString().slice(0, 10));
+}

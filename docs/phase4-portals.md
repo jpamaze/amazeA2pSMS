@@ -1,6 +1,8 @@
-# Phase 4 slice 1: portals, reports, live monitoring, alerts
+# Phase 4: portals, reports, live monitoring, alerts, operations screens
 
-One web app serves the admin (platform), reseller and customer portals; what each user sees follows their account's role and their own user role. Slice 2 adds the DLT and platform operations screens (vendors, routes, firewall, deals, disputes, rate cards), which today are API-only.
+One web app serves the admin (platform), reseller and customer portals; what each user sees follows their account's role and their own user role.
+- **Slice 1:** portals, reports, live monitor, alerts, white-label.
+- **Slice 2** ([below](#slice-2-dlt-commercial-and-operations-screens)): screens for everything that was API-only: DLT registrations, deals, disputes and rate cards for every role that uses them, and the platform's operations pages (vendors, routes, firewall, vendor billing, number data, error codes).
 
 ## How it is built
 
@@ -27,6 +29,7 @@ One web app serves the admin (platform), reseller and customer portals; what eac
 | Alerts: low-balance level, e-mails, SMS numbers, webhook; recent alerts | own | own | own |
 | Branding (white-label) | — | own | platform brand |
 | Live monitor | — | — | ✓ |
+| DLT, deals, disputes, rate cards, operations pages | see [slice 2](#who-sees-what-slice-2) | | |
 
 Within an account, the user's role still limits actions: viewer and support read; finance also moves money and credit; admin and owner change everything (only an owner grants owner).
 
@@ -117,3 +120,70 @@ While working on the portal, `cd portal && npm run dev` serves it with hot reloa
   - the phone layout has no horizontal scrolling;
   - **no console errors and no failed API calls**.
 - **Alerter on the dev stack:** a shop with ₹500 against an alert level of ₹1,000 fired once and recorded that e-mail was not configured.
+
+## Slice 2: DLT, commercial and operations screens
+
+### Who sees what (slice 2)
+
+| Page | Customer | Reseller | Platform |
+| --- | --- | --- | --- |
+| DLT: PE IDs, headers (with active template counts), templates by header, TM chain, CSV imports (DLT portal exports as they are), message check | own | own + sub-accounts | any account; also turns DLT checks off/on per account (reason audited) |
+| Deals: price deals per destination, used against the cap | own (read) | own; grants and cancels for its sub-accounts | grants and cancels for accounts directly under it; vendor volume commitments with progress and projected shortfall |
+| Disputes: raise (period, amount, reason, optional message IDs), our records for the period as evidence, withdraw | raises to its provider | raises to the platform; approves or rejects its sub-accounts' claims (the credit comes from its wallet) | approves or rejects claims of accounts directly under it |
+| Rate cards: prices by destination and category, current and scheduled, set one price or import CSV | — | own cards (for sub-accounts) | platform cards |
+| Vendors: list with routing state (failover), binds up, sent/failed and p95 over 30 s; onboarding (SMPP binds with DLT TLV tags, or the HTTP profile); pause/activate/disable; failover policy; costs with CSV import | — | — | ✓ |
+| Routes: default and per-account, least cost / priority / weighted, HLR lookup and refusal | — | — | ✓ |
+| Firewall: block lists (sender, content, link domain, destination; reject or flag); pumping guard limits and blocked ranges per account, unblock | — | — | ✓ |
+| Vendor billing: invoice import, reconciliation against our records with a tolerance, raise a dispute, dispute workflow (open → sent → accepted/rejected → settled) | — | — | ✓ |
+| Number data: number lookup (routed network, series, cached HLR), number series (search, import, replace), MNP imports | — | — | ✓ |
+| Error codes: vendor receipt codes mapped to a reason and the customer code, per vendor or for all | — | — | ✓ |
+
+Pages a role may not use are not rendered at all (no API calls); the navigation groups the platform's pages under **Operations**.
+
+### Onboarding a vendor from the portal
+
+1. **Vendors → New vendor:** name, ID (names its queue and `VENDOR_ID`), SMPP or HTTP. It starts **paused**.
+2. **Set it up:**
+   - SMPP: add binds (host, port, TLS, system ID, password, version, bind type, window, TPS and the TLV tags the vendor wants for PE ID, template ID and TM chain). Passwords are encrypted with `SECRETS_KEY` and never shown again.
+   - HTTP: the profile (base URL, auth, request template, response and receipt mapping, TPS, concurrency, secret). It is validated as the connector will load it. Give the vendor the receipt URL shown under the form.
+3. **Costs:** import them (least-cost routing skips a vendor without a cost for the destination).
+4. **Start a connector** with `VENDOR_ID=<id>`. Connectors read binds and the profile at start, so restart after changes.
+5. **Activate** it, optionally after setting a failover policy. Add routes if it should not only be chosen by least cost.
+
+### API added for slice 2
+
+| Method and path | Notes |
+| --- | --- |
+| `GET`/`POST /v1/vendors`, `GET /v1/vendors/{vendor}` | list with routing state; create (paused); detail with binds (no passwords), HTTP profile (`dlr_path`, `has_secret`), routing and connector reports |
+| `PUT /v1/vendors/{vendor}/status` | `active`, `paused`, `disabled` |
+| `POST /v1/vendors/{vendor}/binds`, `DELETE …/binds/{bind}` | SMPP vendors; password sealed; `tlv_profile` keys `pe_id`, `template_id`, `tm_chain` as hex tags |
+| `PUT /v1/vendors/{vendor}/http-profile` | HTTP vendors; omitting `secret` keeps the stored one |
+| `GET /v1/vendors/{vendor}/costs` | each row `current`, `scheduled` or `superseded` |
+| `GET /v1/vendor-invoices[?vendor=]` | with the latest dispute status |
+| `GET /v1/accounts/{id}/firewall-limits` | effective limits and whether they are custom; the account may read its own |
+| `GET /v1/accounts/{id}/dlt/entities/{pe}/headers` | headers with their active template count |
+| `GET /v1/number-series[?q=]`, `GET /v1/mnp/imports` | series search (first 500) with the total; MNP import history |
+
+All are platform only, except the firewall limits and DLT headers reads, which follow the account rules (own or managed).
+
+Fixed along the way:
+- Disputes now carry `account_name`.
+- `GET /v1/numbers/{msisdn}` returns `mcc`, `mnc`, `source` in lower case.
+- Importing a vendor invoice without ClickHouse returned the error body and the success body in one response; it now returns only the success (the invoice is stored, reconciliation `unavailable`).
+- Binds and HTTP profiles are validated up front (SMPP version, bind type, window, TPS, base URL, required mappings) instead of failing on database constraints.
+
+### Verification (slice 2)
+
+- **Go tests** (`TestOpsEndpoints`): vendor create and validation, platform-only access, bind validation (port, password length, SMPP version, TLV tags), the password stored sealed and never returned, bind disable once, HTTP profile validation and the secret kept on a later save, cost states, invoice import without ClickHouse giving one clean response, firewall limit defaults and custom values, DLT headers with template counts, series search.
+- **Browser walkthrough** (Playwright, headless Chromium) on the dev stack with ClickHouse and Prometheus:
+  - **Customer:** DLT check of the demo OTP (accepted, with template, PE ID and TM chain) and of other text (refused `dlt_template`, SMPP `0x412`, receipt 603); templates tab; raising a dispute.
+  - **Reseller sub-account and its reseller:** the sub-account raises a dispute; the reseller approves ₹2 of ₹3; the reseller grants a capped deal to its sub-account.
+  - **Platform:**
+    - onboards an SMPP vendor (bind with TLV tags, cost import) and opens the HTTP simulator's profile;
+    - a bad TLV tag is refused with the server's message;
+    - adds a priority route and a content rule;
+    - looks up a number, imports series and error codes;
+    - creates a vendor commitment and opens its progress;
+    - imports an invoice that over-bills (₹70 billed against ₹25 in our records), disputes ₹45 and moves the dispute to sent;
+    - rejects the customer's dispute.
+  - **Access and layout:** pages outside a role show "not available" without any API call; no console errors and no failed API calls (other than the one deliberate refusal); vendor, DLT and vendor billing pages have no horizontal scrolling at 390 px.

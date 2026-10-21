@@ -5,10 +5,10 @@ import { get, send } from "@/lib/api";
 import { Brand } from "@/lib/auth";
 import { applyBrand, can, useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
-import { Shell } from "@/components/Shell";
+import { Gate, Shell } from "@/components/Shell";
 import { Button, Card, Field, Input, Loading, Notice, useAction } from "@/components/ui";
 
-export default function Branding() {
+function Branding() {
   const { me, reload: reloadSession } = useSession();
   const acct = me?.account_id;
   const { data, error } = useData(() => (acct ? get<{ own: Brand | null; effective: Brand }>(`/v1/accounts/${acct}/branding`) : Promise.resolve(null)), [acct]);
@@ -64,4 +64,8 @@ export default function Branding() {
       </div>
     </Shell>
   );
+}
+
+export default function Page() {
+  return <Gate roles={["platform", "reseller"]} title="Branding"><Branding /></Gate>;
 }

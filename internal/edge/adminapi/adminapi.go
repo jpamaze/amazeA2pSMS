@@ -74,6 +74,7 @@ func (a *API) Handler() http.Handler {
 	a.networkRoutes(mux)
 	a.portalRoutes(mux)
 	a.portalDataRoutes(mux)
+	a.opsRoutes(mux)
 	return mux
 }
 

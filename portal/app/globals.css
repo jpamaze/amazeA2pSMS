@@ -60,6 +60,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   .shell { grid-template-columns: 1fr; }
   .side { position: static; height: auto; }
   .side nav { flex-direction: row; flex-wrap: wrap; }
+  .side nav .nav-group { flex-basis: 100%; margin: 6px 4px 0; }
   .main { padding: 16px; }
 }
 
@@ -135,3 +136,10 @@ dl.kv dd { margin: 0; word-break: break-word; }
 .user-pick { display: grid; gap: 6px; max-height: 360px; overflow: auto; }
 .user-pick button { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; color: var(--text); font: inherit; }
 .user-pick button:hover { border-color: var(--brand); }
+.side nav .nav-group { margin: 12px 10px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+ul.lines { margin: 0; padding: 8px 8px 8px 24px; max-height: 240px; overflow: auto; font-family: ui-monospace, monospace; font-size: 12px; color: var(--bad); background: var(--bg); border-radius: 8px; }
+.result { padding: 12px; border-radius: 8px; background: var(--bg); }
+.check-ok { border-left: 4px solid var(--good); }
+.check-bad { border-left: 4px solid var(--bad); }
+pre.json { margin: 0; padding: 12px; background: var(--bg); border-radius: 8px; overflow: auto; max-height: 320px; font-size: 12px; }
+.inline-actions { display: flex; gap: 6px; flex-wrap: wrap; }

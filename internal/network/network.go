@@ -28,8 +28,9 @@ import (
 
 // Network is where a number lives.
 type Network struct {
-	MCC, MNC string
-	Source   string // mnp | series | default | hlr
+	MCC    string `json:"mcc"`
+	MNC    string `json:"mnc"`
+	Source string `json:"source"` // mnp | series | default | hlr
 }
 
 // Series maps national number prefixes to networks.

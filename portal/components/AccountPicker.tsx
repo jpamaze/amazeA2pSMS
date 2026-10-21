@@ -3,6 +3,7 @@
 // For platform and reseller users: choose which account a page shows (their
 // own or one they manage). Customers only ever see their own.
 
+import { useEffect, useState } from "react";
 import { get } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
@@ -29,4 +30,13 @@ export function AccountPicker({ value, onChange }: { value: string; onChange: (i
       </Select>
     </Field>
   );
+}
+
+// useAccount is the account a page shows: ?account= when given, else the
+// user's own.
+export function useAccount(): [string, (id: string) => void] {
+  const { me } = useSession();
+  const [acct, setAcct] = useState("");
+  useEffect(() => { if (me && !acct) setAcct(new URLSearchParams(window.location.search).get("account") ?? me.account_id); }, [me, acct]);
+  return [acct, setAcct];
 }

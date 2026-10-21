@@ -7,12 +7,12 @@ import { money, when } from "@/lib/format";
 import { can, useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
 import type { AccountRow } from "@/components/AccountPicker";
-import { Shell } from "@/components/Shell";
+import { Gate, Shell } from "@/components/Shell";
 import { Badge, Button, Card, Field, Input, Notice, Select, Table, useAction } from "@/components/ui";
 
 type RateCard = { id: string; name: string };
 
-export default function Accounts() {
+function Accounts() {
   const { me } = useSession();
   const router = useRouter();
   const [q, setQ] = useState("");
@@ -83,4 +83,8 @@ function NewAccount({ done }: { done: (id: string) => void }) {
       <p className="muted small">New accounts start prepaid (credit limit 0). Add funds and people after creating it.</p>
     </Card>
   );
+}
+
+export default function Page() {
+  return <Gate roles={["platform", "reseller"]} title="Accounts"><Accounts /></Gate>;
 }
