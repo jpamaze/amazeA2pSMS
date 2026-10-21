@@ -14,6 +14,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/kafka"
 	"github.com/jpamaze/amazeA2pSMS/internal/routing"
@@ -21,8 +22,8 @@ import (
 )
 
 func main() {
-	service.Run("router", service.Needs{Postgres: true, Kafka: true}, func(ctx context.Context, d *service.Deps) error {
-		loader, err := routing.NewLoader(ctx, d.PG, d.Log)
+	service.Run("router", service.Needs{Postgres: true, Redis: true, Kafka: true}, func(ctx context.Context, d *service.Deps) error {
+		loader, err := routing.NewLoader(ctx, d.PG, d.Redis, d.Log)
 		if err != nil {
 			return err
 		}
@@ -31,6 +32,7 @@ func main() {
 		return service.ConsumeBatch(ctx, d, "router", []string{kafka.TopicSubmit}, 1000, func(ctx context.Context, recs []*kgo.Record) error {
 			table := loader.Table()
 			out := make([]*kgo.Record, 0, len(recs))
+			dealSegs := map[string]int64{} // routed under vendor deals in this batch
 			for _, rec := range recs {
 				var m domain.Message
 				if err := json.Unmarshal(rec.Value, &m); err != nil {
@@ -51,6 +53,10 @@ func main() {
 					continue
 				}
 				m.Route = &domain.Route{VendorID: dec.VendorID, Cost: dec.Cost}
+				if dec.DealID != "" {
+					dealSegs[dec.DealID] += int64(m.Segments)
+					loader.Progress.Add(dec.DealID, int64(m.Segments))
+				}
 				metrics.Routed.WithLabelValues(dec.VendorID).Inc()
 				r, err := kafka.Record(kafka.RouteTopic(dec.VendorID), m.ID, m)
 				if err != nil {
@@ -58,7 +64,14 @@ func main() {
 				}
 				out = append(out, r)
 			}
-			return kafka.ProduceJSON(ctx, d.Kafka, out...)
+			if err := kafka.ProduceJSON(ctx, d.Kafka, out...); err != nil {
+				return err
+			}
+			// Progress only steers routing; the deal report counts from ClickHouse.
+			if err := deals.AddRouted(ctx, d.Redis, dealSegs); err != nil {
+				d.Log.Warn("vendor deal progress not saved", "err", err)
+			}
+			return nil
 		})
 	})
 }

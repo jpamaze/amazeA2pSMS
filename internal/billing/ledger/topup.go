@@ -37,6 +37,10 @@ type Service struct {
 // TopUp credits the wallet in PostgreSQL (with a ledger entry) and then in
 // Redis. It returns the database balance after the top-up.
 func (s *Service) TopUp(ctx context.Context, t TopUp) (decimal.Decimal, error) {
+	return s.credit(ctx, "topup", t)
+}
+
+func (s *Service) credit(ctx context.Context, kind string, t TopUp) (decimal.Decimal, error) {
 	if !t.Amount.IsPositive() {
 		return decimal.Zero, fmt.Errorf("ledger: top-up amount must be positive")
 	}
@@ -51,8 +55,8 @@ func (s *Service) TopUp(ctx context.Context, t TopUp) (decimal.Decimal, error) {
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_entries
 			(account_id, kind, amount, balance_after, reference, idempotency_key, created_by)
-			VALUES ($1, 'topup', $2, $3, $4, $5, $6)`,
-			t.AccountID, t.Amount, bal, t.Reference, "topup:"+t.IdempotencyKey, t.Actor)
+			VALUES ($1, $7, $2, $3, $4, $5, $6)`,
+			t.AccountID, t.Amount, bal, t.Reference, kind+":"+t.IdempotencyKey, t.Actor, kind)
 		return err
 	})
 	var pgErr *pgconn.PgError

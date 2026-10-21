@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
@@ -39,7 +40,8 @@ type API struct {
 	Secrets  *secrets.Box
 	Log      *slog.Logger
 	Resolver Resolver
-	CH       *records.ClickHouse // usage reports; optional
+	CH       *records.ClickHouse   // usage reports; optional
+	Redis    redis.UniversalClient // live deal counters; optional
 }
 
 type actor struct {
@@ -65,6 +67,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /v1/accounts/{id}/rate-card", a.authed(PermAdmin, a.setRateCard))
 	mux.Handle("GET /v1/rate-cards", a.authed(PermRead, a.listRateCards))
 	a.billingRoutes(mux)
+	a.commercialRoutes(mux)
 	return mux
 }
 

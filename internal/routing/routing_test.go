@@ -3,6 +3,7 @@ package routing
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -55,5 +56,49 @@ func TestWeighted(t *testing.T) {
 	}
 	if n["a"] < 2800 || n["a"] > 3200 {
 		t.Fatalf("3:1 split off: %v", n)
+	}
+}
+
+func TestVendorDeals(t *testing.T) {
+	active := map[string]bool{"spot": true, "deal": true, "dealonly": true, "airtel": true}
+	costs := map[string]map[string]decimal.Decimal{
+		"spot":   {"404|*": d("0.05")},
+		"deal":   {"404|*": d("0.09")},
+		"airtel": {"404|*": d("0.07")},
+	}
+	now := time.Now()
+	run := func(id, vendor, mnc, cost string, commit int64) VendorDeal {
+		return VendorDeal{ID: id, VendorID: vendor, MCC: "404", MNC: mnc, Cost: d(cost), Commit: commit,
+			Starts: now.Add(-time.Hour), Ends: now.Add(time.Hour)}
+	}
+	p := &Progress{}
+	tbl := NewTable([]Rule{{MCC: "404", MNC: "*", Mode: "lcr", Priority: 1}}, active, costs).WithDeals([]VendorDeal{
+		run("d1", "deal", "*", "0.06", 100), // dearer than spot, but committed
+		{ID: "old", VendorID: "spot", MCC: "404", MNC: "*", Cost: d("0.01"), Commit: 1,
+			Starts: now.Add(-2 * time.Hour), Ends: now.Add(-time.Hour)}, // ended: ignored
+	}, p)
+
+	got, _ := tbl.Choose("x", "404", "10")
+	if got.VendorID != "deal" || got.DealID != "d1" || !got.Cost.Equal(d("0.06")) {
+		t.Fatalf("unmet commitment must win at the deal cost: %+v", got)
+	}
+	p.Add("d1", 100)
+	got, _ = tbl.Choose("x", "404", "10")
+	if got.VendorID != "spot" || got.DealID != "" {
+		t.Fatalf("met commitment: back to cheapest: %+v", got)
+	}
+
+	// The deal cost still counts after the commitment, and a network-specific
+	// deal beats a '*' one; a deal needs no cost list entry.
+	tbl = NewTable([]Rule{{MCC: "404", MNC: "*", Mode: "lcr", Priority: 1}}, active, costs).WithDeals([]VendorDeal{
+		run("w", "airtel", "*", "0.08", 10),
+		run("n", "airtel", "45", "0.02", 10),
+		run("only", "dealonly", "*", "0.04", 10),
+	}, &Progress{routed: map[string]int64{"w": 10, "n": 10, "only": 10}})
+	if got, _ := tbl.Choose("x", "404", "45"); got.VendorID != "airtel" || got.DealID != "n" {
+		t.Fatalf("network deal: %+v", got)
+	}
+	if got, _ := tbl.Choose("x", "404", "10"); got.VendorID != "dealonly" || !got.Cost.Equal(d("0.04")) {
+		t.Fatalf("vendor priced only by a deal: %+v", got)
 	}
 }

@@ -26,16 +26,16 @@ vendor deliver_sm ─▶ connector ─▶ sms.dlr ──────────
 | smpp-server | customer binds, `custdlr:{account}` | `sms.submit` | Redis (holds, state, receipts), PG (credentials, prices) |
 | http-api | REST | `sms.submit` | Redis, PG |
 | admin-api | REST | — | PG, Redis, ClickHouse (usage reports) |
-| router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, refreshed from PG |
+| router | `sms.submit` | `sms.route.<vendor>`, `sms.status` (rejected) | in-memory routes, costs and vendor deals, refreshed from PG; Redis (vendor deal progress) |
 | connector | `sms.route.<vendor>`, vendor deliver_sm | `sms.status`, `sms.dlr`, `sms.mo` | Redis (vendor msg ID map), PG (binds) |
 | dlr-processor | `sms.status`, `sms.dlr` | `custdlr:{account}`, `sms.webhooks`, `sms.records` | Redis |
-| rater | `sms.status` | — | Redis wallet, PG ledger + `rater_offsets` |
+| rater | `sms.status` | — | Redis wallet and deal reservations, PG ledger + `rater_offsets` + deal usage |
 | webhook-dispatcher | `sms.webhooks`, `sms.webhooks.retry.1-4` | retry tiers, `sms.webhooks.dead` | PG (webhook URL, encrypted secret) |
 | ch-writer | `sms.submit`, `sms.records` | ClickHouse `message_records` | — |
 
 HTTP vendors: the connector POSTs per `http_vendor_profiles` and serves `/dlr/<vendor>?token=…` on `DLR_ADDR`; receipts go to `sms.dlr` exactly like SMPP ones.
 
-Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency), `binds:{system_id}` (cross-node bind leases).
+Redis keys: `wallet:{acct}` and `wallet:{acct}:holds` (balance, credit limit, holds), `msg:{id}` (state, 96 h TTL), `vmid:<vendor>:<id>` (DLR match), `inflight:<0-15>` (submitted, waiting for DLR), `custdlr:{acct}` (receipt stream, consumer group `deliver`), `idem:{acct}:<key>` (HTTP idempotency), `binds:{system_id}` (cross-node bind leases), `deal:{id}` and `deal:{id}:res` (customer deal volume used and reserved per message), `vdeal:{id}` (segments routed under a vendor deal).
 
 Final receipts (deliver_sm or webhook) and the ClickHouse row are queued before the message is marked notified, so a crash repeats rather than loses them; customers should treat receipts and webhooks as at-least-once and de-duplicate by message ID.
 

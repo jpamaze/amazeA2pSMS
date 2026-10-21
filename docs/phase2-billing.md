@@ -1,6 +1,6 @@
 # Phase 2: billing and commercial
 
-Slice 1 adds reseller billing (two-level wallets), reseller rate cards, wallet transfers, statements and usage reports. Invoices and GST are out of scope for now (statements and usage reports only). Deals and disputes come in slice 2.
+Slice 1 adds reseller billing (two-level wallets), reseller rate cards, wallet transfers, statements and usage reports. Invoices and GST are out of scope for now (statements and usage reports only). Deals and disputes are slice 2: [phase2-deals-disputes.md](phase2-deals-disputes.md).
 
 ## Two-level wallets
 

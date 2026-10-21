@@ -75,6 +75,7 @@ func main() {
 			Credits:  credit.New(d.PG, wallets),
 			Ledger:   &ledger.Service{PG: d.PG, Wallets: wallets},
 			Resolver: resolver,
+			Redis:    d.Redis,
 		}
 		if ac.CHURL != "" {
 			api.CH = &records.ClickHouse{URL: ac.CHURL, Database: ac.CHDB, User: ac.CHUser, Password: ac.CHPassword}

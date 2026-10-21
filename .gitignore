@@ -9,3 +9,7 @@ deploy/vm/.env
 deploy/vm/reports/*.json
 deploy/vm/reports/since.txt
 deploy/vm/monitoring/prometheus.yml
+
+# Redis snapshot when redis-server runs from the repo; binaries from `go build ./cmd/<name>` at the root
+dump.rdb
+/billing-check

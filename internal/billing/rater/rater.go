@@ -17,9 +17,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/domain"
 )
@@ -27,6 +29,7 @@ import (
 // Rater settles holds and books charges.
 type Rater struct {
 	Wallets *wallet.Store
+	Redis   redis.UniversalClient // customer deal reservations; nil skips them
 	PG      *pgxpool.Pool
 	Log     *slog.Logger
 }
@@ -56,6 +59,13 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 		price decimal.Decimal
 	}
 	var charges []charge
+	type dealUse struct {
+		rec      *kgo.Record
+		id       string
+		segments int
+	}
+	var used []dealUse
+	var dealOps []deals.Op
 	for _, rec := range recs {
 		var ev domain.StatusEvent
 		if err := json.Unmarshal(rec.Value, &ev); err != nil {
@@ -78,9 +88,18 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 				if l.Amount.IsPositive() {
 					charges = append(charges, charge{rec: rec, acct: l.AccountID, price: l.Amount})
 				}
+				if l.DealID != "" {
+					if l.DealReserved {
+						dealOps = append(dealOps, deals.Op{DealID: l.DealID, MsgID: ev.MessageID})
+					}
+					used = append(used, dealUse{rec: rec, id: l.DealID, segments: l.DealSegments})
+				}
 			}
 		case released(ev):
 			for _, l := range levels {
+				if l.DealReserved {
+					dealOps = append(dealOps, deals.Op{DealID: l.DealID, MsgID: ev.MessageID, Release: true})
+				}
 				if l.HoldID == "" || !l.Amount.IsPositive() {
 					continue
 				}
@@ -88,6 +107,12 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 					return err
 				}
 			}
+		}
+	}
+
+	if r.Redis != nil {
+		if err := deals.Apply(ctx, r.Redis, dealOps); err != nil {
+			return fmt.Errorf("rater: deal reservations: %w", err)
 		}
 	}
 
@@ -118,6 +143,17 @@ func (r *Rater) Process(ctx context.Context, recs []*kgo.Record) error {
 			}
 			sums[c.acct] = sums[c.acct].Add(c.price)
 			counts[c.acct]++
+		}
+		dealSegs := map[string]int64{}
+		for _, u := range used {
+			if u.rec.Offset > last[tp{u.rec.Topic, u.rec.Partition}] {
+				dealSegs[u.id] += int64(u.segments)
+			}
+		}
+		for id, n := range dealSegs {
+			if _, err := tx.Exec(ctx, `UPDATE customer_deals SET used_segments = used_segments + $2 WHERE id = $1`, id, n); err != nil {
+				return fmt.Errorf("rater: deal %s: %w", id, err)
+			}
 		}
 		batch := uuid.NewString()
 		for acct, sum := range sums {

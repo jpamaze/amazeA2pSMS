@@ -12,6 +12,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/auth"
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
@@ -55,6 +56,7 @@ func main() {
 		store := msgstore.New(d.Redis)
 		pipeline := &ingest.Pipeline{
 			Chain:   &hierarchy.Cached{PG: d.PG, TTL: time.Minute},
+			Deals:   &deals.Book{PG: d.PG, Redis: d.Redis},
 			Pricer:  pricing.NewCached(d.PG, time.Minute),
 			Wallets: wallet.New(d.Redis),
 			Store:   store,

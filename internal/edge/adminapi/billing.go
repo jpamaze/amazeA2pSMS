@@ -456,8 +456,8 @@ func (a *API) usage(w http.ResponseWriter, r *http.Request, act actor) {
 		       countIf(mapContains(charges, '%[1]s') AND account_id != toUUID('%[1]s')) AS via_sub_accounts,
 		       toString(sum(charges['%[1]s'])) AS charged
 		FROM message_records FINAL
-		WHERE accepted_at >= '%[2]s' AND accepted_at < '%[3]s' AND mapContains(charges, '%[1]s')
-		GROUP BY day ORDER BY day`, id, from.UTC().Format("2006-01-02 15:04:05"), to.UTC().Format("2006-01-02 15:04:05")))
+		WHERE accepted_at >= %[2]s AND accepted_at < %[3]s AND mapContains(charges, '%[1]s')
+		GROUP BY day ORDER BY day`, id, chTime(from), chTime(to)))
 	if err != nil {
 		a.Log.Error("usage query", "err", err)
 		writeErr(w, http.StatusServiceUnavailable, "usage store unavailable")

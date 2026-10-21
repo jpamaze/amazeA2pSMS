@@ -28,6 +28,21 @@ type Transfer struct {
 // spending on in-flight messages), books both sides in PostgreSQL, then
 // credits To in Redis. A failed or duplicate booking refunds the debit.
 func (s *Service) Transfer(ctx context.Context, t Transfer) (decimal.Decimal, error) {
+	return s.move(ctx, t, "transfer_out", "transfer_in", "transfer:")
+}
+
+// Refund credits an approved dispute to To. With From empty the platform
+// pays (a 'refund' entry); otherwise that reseller's wallet pays, like a
+// transfer ('refund_given' on From, 'refund' on To).
+func (s *Service) Refund(ctx context.Context, t Transfer) (decimal.Decimal, error) {
+	if t.From == "" {
+		return s.credit(ctx, "refund", TopUp{AccountID: t.To, Amount: t.Amount, Reference: t.Reference,
+			IdempotencyKey: t.IdempotencyKey, Actor: t.Actor})
+	}
+	return s.move(ctx, t, "refund_given", "refund", "refund:")
+}
+
+func (s *Service) move(ctx context.Context, t Transfer, outKind, inKind, keyPrefix string) (decimal.Decimal, error) {
 	if !t.Amount.IsPositive() {
 		return decimal.Zero, fmt.Errorf("ledger: transfer amount must be positive")
 	}
@@ -61,10 +76,10 @@ func (s *Service) Transfer(ctx context.Context, t Transfer) (decimal.Decimal, er
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_entries
 			(account_id, kind, amount, balance_after, reference, idempotency_key, created_by, counterparty) VALUES
-			($1, 'transfer_out', $3, $4, $5, $6, $7, $2),
-			($2, 'transfer_in',  $8, $9, $5, $10, $7, $1)`,
-			t.From, t.To, t.Amount.Neg(), outBal, t.Reference, "transfer:"+t.IdempotencyKey+":out", t.Actor,
-			t.Amount, toBal, "transfer:"+t.IdempotencyKey+":in")
+			($1, $11, $3, $4, $5, $6, $7, $2),
+			($2, $12, $8, $9, $5, $10, $7, $1)`,
+			t.From, t.To, t.Amount.Neg(), outBal, t.Reference, keyPrefix+t.IdempotencyKey+":out", t.Actor,
+			t.Amount, toBal, keyPrefix+t.IdempotencyKey+":in", outKind, inKind)
 		return err
 	})
 	var pgErr *pgconn.PgError

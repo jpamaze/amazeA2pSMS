@@ -57,7 +57,11 @@ type Row struct {
 
 const tsLayout = "2006-01-02 15:04:05.000"
 
-func ts(t time.Time) string { return t.UTC().Format(tsLayout) }
+// ist is the time zone of the DateTime64 columns: ClickHouse reads a
+// timestamp string as wall-clock time in the column's zone.
+var ist = time.FixedZone("IST", 5*3600+1800)
+
+func ts(t time.Time) string { return t.In(ist).Format(tsLayout) }
 
 func orZero(s string) string {
 	if s == "" {

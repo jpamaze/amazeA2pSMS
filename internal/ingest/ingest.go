@@ -17,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/hierarchy"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/pricing"
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
@@ -72,6 +73,7 @@ type Result struct {
 // Pipeline accepts messages.
 type Pipeline struct {
 	Chain   hierarchy.Chain // who pays; nil charges the sender only
+	Deals   *deals.Book     // customer deals; nil = rate cards only
 	Pricer  pricing.Pricer
 	Wallets *wallet.Store
 	Store   *msgstore.Store
@@ -161,12 +163,15 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	// fail undoes everything done so far, so the customer can safely retry.
-	var held []domain.Charge
+	var held, reserved []domain.Charge
 	fail := func(err error) (Result, error) {
 		bg, c := context.WithTimeout(context.Background(), time.Second)
 		defer c()
 		for _, h := range held {
 			_ = p.Wallets.Release(bg, h.AccountID, h.HoldID)
+		}
+		for _, r := range reserved {
+			_ = deals.Release(bg, p.Redis, r.DealID, msgID)
 		}
 		_ = p.Store.Delete(bg, msgID)
 		if idemKey != "" {
@@ -184,10 +189,40 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 			return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
 		}
 	}
-	// Each paying account is priced by its own rate card: the sender at the
-	// price its reseller set, each reseller at the price charged to it.
+	// Each paying account is priced by its own deal or rate card: the sender
+	// at the price its reseller set, each reseller at the price charged to it.
 	charges := make([]domain.Charge, 0, len(chain))
 	for i, acct := range chain {
+		ch := domain.Charge{AccountID: acct, HoldID: msgID}
+		var unit decimal.Decimal
+		if p.Deals != nil {
+			d, err := p.Deals.Find(ctx, acct, dest.MCC, dest.MNC)
+			if err != nil {
+				return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
+			}
+			// A capped deal applies only if its remaining volume covers the
+			// whole message; otherwise the rate card prices it.
+			if d != nil && d.Cap > 0 {
+				ok, err := p.Deals.Reserve(ctx, d, msgID, segments)
+				if err != nil {
+					return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
+				}
+				if !ok {
+					d = nil
+				} else {
+					ch.DealReserved = true
+					reserved = append(reserved, domain.Charge{DealID: d.ID})
+				}
+			}
+			if d != nil {
+				unit, ch.DealID, ch.DealSegments = d.Price, d.ID, segments
+			}
+		}
+		if ch.DealID != "" {
+			ch.Amount = unit.Mul(decimal.NewFromInt(int64(segments)))
+			charges = append(charges, ch)
+			continue
+		}
 		unit, err := p.Pricer.Price(ctx, acct, dest.MCC, dest.MNC, "*")
 		if err != nil {
 			switch {
@@ -198,7 +233,8 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 			}
 			return fail(fmt.Errorf("%w: %v", ErrUnavailable, err))
 		}
-		charges = append(charges, domain.Charge{AccountID: acct, HoldID: msgID, Amount: unit.Mul(decimal.NewFromInt(int64(segments)))})
+		ch.Amount = unit.Mul(decimal.NewFromInt(int64(segments)))
+		charges = append(charges, ch)
 	}
 	price := charges[0].Amount
 

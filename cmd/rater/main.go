@@ -15,7 +15,7 @@ import (
 
 func main() {
 	service.Run("rater", service.Needs{Postgres: true, Redis: true, Kafka: true}, func(ctx context.Context, d *service.Deps) error {
-		r := &rater.Rater{Wallets: wallet.New(d.Redis), PG: d.PG, Log: d.Log}
+		r := &rater.Rater{Wallets: wallet.New(d.Redis), Redis: d.Redis, PG: d.PG, Log: d.Log}
 		return service.ConsumeBatch(ctx, d, "rater", []string{kafka.TopicStatus}, 5000,
 			func(ctx context.Context, recs []*kgo.Record) error { return r.Process(ctx, recs) })
 	})

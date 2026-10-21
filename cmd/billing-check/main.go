@@ -7,6 +7,10 @@
 //     messages ClickHouse shows a vendor accepted;
 //  4. no message accepted since -since is still without a final status.
 //
+// Take -since while the platform is idle: the rater books charges a few
+// seconds behind the traffic, so charges for messages accepted just before
+// -since would land inside the window and fail check 3.
+//
 // It exits 0 when every check passes and 2 otherwise.
 package main
 
@@ -108,7 +112,7 @@ func main() {
 	chRows, err := ch.Query(ctx, fmt.Sprintf(`SELECT acct, toString(sum(amount)), count()
 		FROM message_records FINAL
 		ARRAY JOIN mapKeys(charges) AS acct, mapValues(charges) AS amount
-		WHERE accepted_at >= '%s' AND vendor_id != '' AND status IN ('submitted','delivered','failed','expired')
+		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND vendor_id != '' AND status IN ('submitted','delivered','failed','expired')
 		GROUP BY acct`, ts))
 	if err != nil {
 		fatal(err)
@@ -136,7 +140,7 @@ func main() {
 
 	// 4: nothing stuck.
 	stuck, err := ch.Query(ctx, fmt.Sprintf(`SELECT status, count() FROM message_records FINAL
-		WHERE accepted_at >= '%s' AND status IN ('accepted','submitted') GROUP BY status`, ts))
+		WHERE accepted_at >= toDateTime64('%s', 3, 'UTC') AND status IN ('accepted','submitted') GROUP BY status`, ts))
 	if err != nil {
 		fatal(err)
 	}

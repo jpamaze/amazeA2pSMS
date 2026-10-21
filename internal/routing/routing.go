@@ -1,6 +1,11 @@
 // Package routing chooses a vendor for a message from an in-memory copy of
-// the routes, vendors and vendor costs tables, reloaded in the background
-// (blueprint rule 6: config is never queried per message).
+// the routes, vendors, vendor costs and vendor deals tables, reloaded in the
+// background (blueprint rule 6: config is never queried per message).
+//
+// A vendor deal replaces the vendor's cost on its destination while it runs.
+// Until its committed volume has been routed, least-cost routing picks among
+// vendors with unmet commitments first, so commitments are met before
+// cheaper spot routes are used.
 package routing
 
 import (
@@ -9,11 +14,15 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
+
+	"github.com/jpamaze/amazeA2pSMS/internal/billing/deals"
 )
 
 // ErrNoRoute means no active vendor can take the message.
@@ -29,11 +38,57 @@ type Rule struct {
 	Weight    int
 }
 
+// VendorDeal is one row of vendor_deals.
+type VendorDeal struct {
+	ID, VendorID string
+	MCC, MNC     string // MNC '*' for every network
+	Cost         decimal.Decimal
+	Commit       int64 // segments
+	Starts, Ends time.Time
+}
+
+// Progress counts segments routed under each vendor deal. It is shared by
+// successive tables and refreshed from Redis, where every router adds to it.
+type Progress struct {
+	mu     sync.Mutex
+	routed map[string]int64
+}
+
+// Add counts n segments routed under deal id.
+func (p *Progress) Add(id string, n int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.routed == nil {
+		p.routed = map[string]int64{}
+	}
+	p.routed[id] += n
+}
+
+// Get returns segments routed under deal id.
+func (p *Progress) Get(id string) int64 {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.routed[id]
+}
+
+// Set replaces the counts with totals across all routers.
+func (p *Progress) Set(m map[string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.routed = m
+}
+
 // Table is an immutable snapshot of routing config.
 type Table struct {
 	rules    []Rule
 	active   map[string]bool                       // vendor ID -> status active
 	costs    map[string]map[string]decimal.Decimal // vendor -> "mcc|mnc" -> cost
+	deals    map[string][]VendorDeal               // vendor -> deals not yet ended
+	progress *Progress
+	now      func() time.Time
 	loadedAt time.Time
 }
 
@@ -41,13 +96,26 @@ type Table struct {
 func NewTable(rules []Rule, active map[string]bool, costs map[string]map[string]decimal.Decimal) *Table {
 	r := append([]Rule(nil), rules...)
 	sort.SliceStable(r, func(i, j int) bool { return r[i].Priority < r[j].Priority })
-	return &Table{rules: r, active: active, costs: costs, loadedAt: time.Now()}
+	return &Table{rules: r, active: active, costs: costs, now: time.Now, loadedAt: time.Now()}
 }
 
-// Decision is the chosen vendor and its cost per segment.
+// WithDeals adds vendor deals and their shared progress counter (nil counts
+// nothing as routed yet). Call it before the table is in use.
+func (t *Table) WithDeals(list []VendorDeal, p *Progress) *Table {
+	t.deals = map[string][]VendorDeal{}
+	for _, d := range list {
+		t.deals[d.VendorID] = append(t.deals[d.VendorID], d)
+	}
+	t.progress = p
+	return t
+}
+
+// Decision is the chosen vendor, its cost per segment and the vendor deal
+// that set the cost, if any.
 type Decision struct {
 	VendorID string
 	Cost     decimal.Decimal
+	DealID   string
 }
 
 // Choose picks a vendor. Account-specific rules win over platform defaults;
@@ -88,10 +156,8 @@ func (t *Table) pick(rules []Rule, mcc, mnc string) (Decision, bool) {
 				}
 			case "priority":
 				if t.active[r.VendorID] {
-					if c, ok := t.cost(r.VendorID, mcc, mnc); ok {
-						return Decision{VendorID: r.VendorID, Cost: c}, true
-					}
-					return Decision{VendorID: r.VendorID}, true
+					d, _, _ := t.price(r.VendorID, mcc, mnc)
+					return d, true
 				}
 			case "weighted":
 				if t.active[r.VendorID] {
@@ -107,8 +173,8 @@ func (t *Table) pick(rules []Rule, mcc, mnc string) (Decision, bool) {
 			n := rand.IntN(total)
 			for _, r := range weighted {
 				if n < r.Weight {
-					c, _ := t.cost(r.VendorID, mcc, mnc)
-					return Decision{VendorID: r.VendorID, Cost: c}, true
+					d, _, _ := t.price(r.VendorID, mcc, mnc)
+					return d, true
 				}
 				n -= r.Weight
 			}
@@ -117,45 +183,99 @@ func (t *Table) pick(rules []Rule, mcc, mnc string) (Decision, bool) {
 	return Decision{}, false
 }
 
-func (t *Table) cost(vendor, mcc, mnc string) (decimal.Decimal, bool) {
-	m := t.costs[vendor]
-	if c, ok := m[mcc+"|"+mnc]; ok {
-		return c, true
+// price returns what vendor charges for the destination: the running deal's
+// cost if there is one, else its cost list. open reports a deal whose
+// commitment is not yet met; ok is false when the vendor has no price.
+func (t *Table) price(vendor, mcc, mnc string) (d Decision, open, ok bool) {
+	d.VendorID = vendor
+	if deal := t.deal(vendor, mcc, mnc); deal != nil {
+		d.Cost, d.DealID = deal.Cost, deal.ID
+		return d, t.progress.Get(deal.ID) < deal.Commit, true
 	}
-	c, ok := m[mcc+"|*"]
-	return c, ok
+	m := t.costs[vendor]
+	if c, found := m[mcc+"|"+mnc]; found {
+		d.Cost = c
+		return d, false, true
+	}
+	d.Cost, ok = m[mcc+"|*"]
+	return d, false, ok
 }
 
+// deal returns the vendor's deal running now for the destination; one for
+// the exact network wins over a '*' deal.
+func (t *Table) deal(vendor, mcc, mnc string) *VendorDeal {
+	now := t.now()
+	var best *VendorDeal
+	for i := range t.deals[vendor] {
+		d := &t.deals[vendor][i]
+		if d.MCC != mcc || (d.MNC != "*" && d.MNC != mnc) || now.Before(d.Starts) || !now.Before(d.Ends) {
+			continue
+		}
+		if best == nil || (best.MNC == "*" && d.MNC != "*") {
+			best = d
+		}
+	}
+	return best
+}
+
+// cheapest picks the lowest cost among vendors with an unmet deal
+// commitment, or among all active vendors when there are none.
 func (t *Table) cheapest(mcc, mnc string) (Decision, bool) {
-	var best Decision
-	found := false
-	vendors := make([]string, 0, len(t.costs))
-	for v := range t.costs {
-		vendors = append(vendors, v)
+	seen := map[string]bool{}
+	vendors := make([]string, 0, len(t.costs)+len(t.deals))
+	for _, m := range []map[string]bool{keys(t.costs), keys(t.deals)} {
+		for v := range m {
+			if !seen[v] {
+				seen[v] = true
+				vendors = append(vendors, v)
+			}
+		}
 	}
 	sort.Strings(vendors) // deterministic tie-break
+	var best, bestOpen Decision
+	found, foundOpen := false, false
 	for _, v := range vendors {
 		if !t.active[v] {
 			continue
 		}
-		c, ok := t.cost(v, mcc, mnc)
-		if ok && (!found || c.LessThan(best.Cost)) {
-			best, found = Decision{VendorID: v, Cost: c}, true
+		d, open, ok := t.price(v, mcc, mnc)
+		if !ok {
+			continue
 		}
+		if !found || d.Cost.LessThan(best.Cost) {
+			best, found = d, true
+		}
+		if open && (!foundOpen || d.Cost.LessThan(bestOpen.Cost)) {
+			bestOpen, foundOpen = d, true
+		}
+	}
+	if foundOpen {
+		return bestOpen, true
 	}
 	return best, found
 }
 
-// Loader keeps a Table fresh from PostgreSQL.
-type Loader struct {
-	pool  *pgxpool.Pool
-	log   *slog.Logger
-	table atomic.Pointer[Table]
+func keys[V any](m map[string]V) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
 }
 
-// NewLoader loads once and returns the loader.
-func NewLoader(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (*Loader, error) {
-	l := &Loader{pool: pool, log: log}
+// Loader keeps a Table fresh from PostgreSQL, and vendor deal progress
+// fresh from Redis.
+type Loader struct {
+	pool     *pgxpool.Pool
+	rdb      redis.UniversalClient // nil: deal progress is local only
+	log      *slog.Logger
+	table    atomic.Pointer[Table]
+	Progress *Progress
+}
+
+// NewLoader loads once and returns the loader. rdb may be nil.
+func NewLoader(ctx context.Context, pool *pgxpool.Pool, rdb redis.UniversalClient, log *slog.Logger) (*Loader, error) {
+	l := &Loader{pool: pool, rdb: rdb, log: log, Progress: &Progress{}}
 	t, err := l.load(ctx)
 	if err != nil {
 		return nil, err
@@ -245,5 +365,32 @@ func (l *Loader) load(ctx context.Context) (*Table, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return NewTable(rules, active, costs), nil
+
+	rows, err = l.pool.Query(ctx, `
+		SELECT id, vendor_id, mcc, mnc, cost, commit_segments, starts_at, ends_at
+		FROM vendor_deals WHERE status = 'active' AND ends_at > now()`)
+	if err != nil {
+		return nil, err
+	}
+	var vds []VendorDeal
+	var ids []string
+	for rows.Next() {
+		var d VendorDeal
+		if err := rows.Scan(&d.ID, &d.VendorID, &d.MCC, &d.MNC, &d.Cost, &d.Commit, &d.Starts, &d.Ends); err != nil {
+			return nil, err
+		}
+		vds = append(vds, d)
+		ids = append(ids, d.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if l.rdb != nil {
+		if n, err := deals.Routed(ctx, l.rdb, ids); err != nil {
+			l.log.Warn("vendor deal progress not refreshed", "err", err)
+		} else {
+			l.Progress.Set(n)
+		}
+	}
+	return NewTable(rules, active, costs).WithDeals(vds, l.Progress), nil
 }

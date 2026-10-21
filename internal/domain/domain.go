@@ -87,6 +87,10 @@ type Charge struct {
 	AccountID string          `json:"account_id"`
 	HoldID    string          `json:"hold_id"`
 	Amount    decimal.Decimal `json:"amount"`
+	// Set when a customer deal priced this level.
+	DealID       string `json:"deal_id,omitempty"`
+	DealSegments int    `json:"deal_segments,omitempty"`
+	DealReserved bool   `json:"deal_reserved,omitempty"` // capped: volume reserved in Redis
 }
 
 // Route is the routing decision attached by the router.
