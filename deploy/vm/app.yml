@@ -38,11 +38,13 @@ services:
     image: ${REGISTRY}/http-api:${TAG}
     build: { <<: *build, args: { SERVICE: http-api } }
     environment: { <<: *env, OPS_ADDR: ":9102" }
+  # Needs Keycloak (OIDC_ISSUER) outside dev; not part of the load test.
   admin-api:
     <<: *svc
+    profiles: [admin]
     image: ${REGISTRY}/admin-api:${TAG}
     build: { <<: *build, args: { SERVICE: admin-api } }
-    environment: { <<: *env, OPS_ADDR: ":9103" }
+    environment: { <<: *env, OPS_ADDR: ":9103", OIDC_ISSUER: "${OIDC_ISSUER:-}" }
   router:
     <<: *svc
     image: ${REGISTRY}/router:${TAG}

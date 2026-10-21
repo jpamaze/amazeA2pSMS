@@ -94,6 +94,24 @@ services:
     <<: *service
     build: { context: .., args: { SERVICE: admin-api } }
     ports: ["8081:8081", "9103:9090"]
+    environment:
+      <<: *env
+      # Tokens are issued for localhost:8180 (what your browser/curl uses);
+      # inside Docker, discovery is fetched from the keycloak service.
+      OIDC_ISSUER: http://localhost:8180/realms/amaze
+      OIDC_DISCOVERY_URL: http://keycloak:8080/realms/amaze
+
+  # Dev identity provider. Sign in as ops@amaze.local / dev-only-change-me.
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    command: ["start-dev", "--import-realm", "--http-port=8080", "--hostname=http://localhost:8180"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    volumes: ["./keycloak/amaze-realm.json:/opt/keycloak/data/import/amaze-realm.json:ro"]
+    ports: ["8180:8080"]
 
   router:
     <<: *service

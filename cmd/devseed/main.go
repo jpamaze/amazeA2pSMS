@@ -123,6 +123,12 @@ func run(simHost string, simPort, simBinds int, balance, price string, tps int) 
 			}
 		}
 
+		// Platform owner who signs in to the admin API through the dev Keycloak.
+		if _, err := tx.Exec(ctx, `INSERT INTO users (account_id, email, role) VALUES ($1, 'ops@amaze.local', 'owner')
+			ON CONFLICT ((lower(email))) DO NOTHING`, platformID); err != nil {
+			return err
+		}
+
 		hash, err := auth.HashPassword("demo123")
 		if err != nil {
 			return err

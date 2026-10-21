@@ -1,8 +1,7 @@
-// Package adminapi manages accounts, wallets, credentials and webhooks.
+// Package adminapi manages accounts, users, wallets, credentials and webhooks.
 //
-// Authentication is a stand-in until Keycloak OIDC: the actor comes from the
-// X-Actor-Account and X-Actor-User headers, so the API refuses to serve
-// unless APP_ENV=dev.
+// Callers sign in with Keycloak (OIDC bearer tokens, see auth.go); their
+// users.role sets what they may do. Every change is written to admin_audit.
 package adminapi
 
 import (
@@ -16,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -31,54 +31,137 @@ import (
 
 // API is the admin HTTP API.
 type API struct {
-	PG      *pgxpool.Pool
-	Wallets *wallet.Store
-	Credits *credit.Service
-	Ledger  *ledger.Service
-	Secrets *secrets.Box
-	Log     *slog.Logger
-	DevAuth bool // header-based actor; only with APP_ENV=dev
+	PG       *pgxpool.Pool
+	Wallets  *wallet.Store
+	Credits  *credit.Service
+	Ledger   *ledger.Service
+	Secrets  *secrets.Box
+	Log      *slog.Logger
+	Resolver Resolver
 }
 
 type actor struct {
 	AccountID string
-	User      string
-	Role      string
+	User      string // email
+	Role      string // account role: platform | reseller | customer
+	UserRole  string // users.role: owner | admin | finance | support | viewer
+	Perm      Permission
 }
 
 // Handler returns the routed handler.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/accounts", a.authed(a.createAccount))
-	mux.Handle("GET /v1/accounts/{id}/wallet", a.authed(a.getWallet))
-	mux.Handle("POST /v1/accounts/{id}/topups", a.authed(a.topUp))
-	mux.Handle("PUT /v1/accounts/{id}/credit-limit", a.authed(a.setCreditLimit))
-	mux.Handle("POST /v1/accounts/{id}/smpp-credentials", a.authed(a.createSMPPCredential))
-	mux.Handle("POST /v1/accounts/{id}/api-keys", a.authed(a.createAPIKey))
-	mux.Handle("PUT /v1/accounts/{id}/webhook", a.authed(a.setWebhook))
-	mux.Handle("PUT /v1/accounts/{id}/rate-card", a.authed(a.setRateCard))
-	mux.Handle("GET /v1/rate-cards", a.authed(a.listRateCards))
+	mux.Handle("GET /v1/me", a.authed(PermRead, a.me))
+	mux.Handle("POST /v1/accounts", a.authed(PermAdmin, a.createAccount))
+	mux.Handle("POST /v1/accounts/{id}/users", a.authed(PermAdmin, a.createUser))
+	mux.Handle("GET /v1/accounts/{id}/wallet", a.authed(PermRead, a.getWallet))
+	mux.Handle("POST /v1/accounts/{id}/topups", a.authed(PermFinance, a.topUp))
+	mux.Handle("PUT /v1/accounts/{id}/credit-limit", a.authed(PermFinance, a.setCreditLimit))
+	mux.Handle("POST /v1/accounts/{id}/smpp-credentials", a.authed(PermAdmin, a.createSMPPCredential))
+	mux.Handle("POST /v1/accounts/{id}/api-keys", a.authed(PermAdmin, a.createAPIKey))
+	mux.Handle("PUT /v1/accounts/{id}/webhook", a.authed(PermAdmin, a.setWebhook))
+	mux.Handle("PUT /v1/accounts/{id}/rate-card", a.authed(PermAdmin, a.setRateCard))
+	mux.Handle("GET /v1/rate-cards", a.authed(PermRead, a.listRateCards))
 	return mux
 }
 
-func (a *API) authed(h func(http.ResponseWriter, *http.Request, actor)) http.Handler {
+// authed resolves the caller, checks its permission and audits changes.
+func (a *API) authed(need Permission, h func(http.ResponseWriter, *http.Request, actor)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !a.DevAuth {
-			writeErr(w, http.StatusNotImplemented, "authentication not wired yet")
+		if a.Resolver == nil {
+			writeErr(w, http.StatusServiceUnavailable, "no sign-in configured (set OIDC_ISSUER)")
 			return
 		}
-		act := actor{AccountID: r.Header.Get("X-Actor-Account"), User: r.Header.Get("X-Actor-User")}
-		if act.AccountID == "" || act.User == "" {
-			writeErr(w, http.StatusUnauthorized, "X-Actor-Account and X-Actor-User are required")
+		act, err := a.Resolver.Resolve(r)
+		switch {
+		case errors.Is(err, errNoUser):
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		case err != nil:
+			w.Header().Set("WWW-Authenticate", `Bearer realm="amaze-admin"`)
+			writeErr(w, http.StatusUnauthorized, errUnauthenticated.Error())
 			return
 		}
-		err := a.PG.QueryRow(r.Context(), `SELECT role FROM accounts WHERE id = $1 AND status = 'active'`, act.AccountID).Scan(&act.Role)
-		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "unknown actor account")
+		if act.Perm < need {
+			writeErr(w, http.StatusForbidden, "your role ("+act.UserRole+") does not allow this")
 			return
 		}
-		h(w, r, act)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h(rec, r, act)
+		if r.Method != http.MethodGet {
+			a.audit(r, act, rec.status)
+		}
 	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (a *API) audit(r *http.Request, act actor, status int) {
+	ip, _, _ := strings.Cut(r.RemoteAddr, ":")
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := a.PG.Exec(ctx, `INSERT INTO admin_audit (actor_email, actor_acct, method, path, status, remote_ip)
+		VALUES ($1, $2, $3, $4, $5, $6)`, act.User, act.AccountID, r.Method, r.URL.Path, status, ip); err != nil {
+		a.Log.Error("admin audit write failed", "err", err, "actor", act.User, "path", r.URL.Path)
+	}
+}
+
+func (a *API) me(w http.ResponseWriter, _ *http.Request, act actor) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"email": act.User, "account_id": act.AccountID, "account_role": act.Role, "user_role": act.UserRole,
+	})
+}
+
+// createUser grants a person sign-in access to an account. The person signs
+// in through Keycloak with this email; an owner role can only be granted by
+// an owner.
+func (a *API) createUser(w http.ResponseWriter, r *http.Request, act actor) {
+	id, ok := a.managedOrSelf(w, r, act)
+	if !ok {
+		return
+	}
+	var req struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if _, known := rolePerm[req.Role]; !known || !strings.Contains(req.Email, "@") {
+		writeErr(w, http.StatusBadRequest, "email and role (owner, admin, finance, support, viewer) are required")
+		return
+	}
+	if req.Role == "owner" && act.UserRole != "owner" {
+		writeErr(w, http.StatusForbidden, "only an owner can grant the owner role")
+		return
+	}
+	var uid string
+	if err := a.PG.QueryRow(r.Context(), `INSERT INTO users (account_id, email, role) VALUES ($1, $2, $3) RETURNING id`,
+		id, req.Email, req.Role).Scan(&uid); err != nil {
+		writeDBErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": uid, "email": req.Email, "role": req.Role})
+}
+
+// managedOrSelf allows the actor's own account as well as accounts it manages.
+func (a *API) managedOrSelf(w http.ResponseWriter, r *http.Request, act actor) (string, bool) {
+	if r.PathValue("id") == act.AccountID {
+		return act.AccountID, true
+	}
+	return a.managed(w, r, act)
 }
 
 // canManage: the platform manages every account; a reseller manages its

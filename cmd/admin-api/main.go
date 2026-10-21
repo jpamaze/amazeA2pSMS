@@ -21,6 +21,12 @@ import (
 type adminConfig struct {
 	Addr       string `env:"ADMIN_ADDR" envDefault:":8081"`
 	SecretsKey string `env:"SECRETS_KEY"`
+	// Keycloak realm URL, e.g. https://sso.example.com/realms/amaze. Required
+	// outside APP_ENV=dev; in dev, leaving it empty enables header sign-in.
+	OIDCIssuer   string `env:"OIDC_ISSUER"`
+	OIDCAudience string `env:"OIDC_AUDIENCE" envDefault:"amaze-admin"`
+	// Optional: fetch discovery here when it differs from the issuer URL.
+	OIDCDiscovery string `env:"OIDC_DISCOVERY_URL"`
 }
 
 func main() {
@@ -33,12 +39,36 @@ func main() {
 		if err != nil {
 			return err
 		}
+		var resolver adminapi.Resolver
+		switch {
+		case ac.OIDCIssuer != "":
+			// Keep trying discovery: Keycloak may start after us.
+			for backoff := time.Second; ; backoff = min(backoff*2, 30*time.Second) {
+				o, err := adminapi.NewOIDC(ctx, d.PG, ac.OIDCIssuer, ac.OIDCAudience, ac.OIDCDiscovery)
+				if err == nil {
+					resolver = o
+					break
+				}
+				d.Log.Warn("OIDC issuer not reachable yet; retrying", "err", err, "retry_in", backoff)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
+			}
+			d.Log.Info("admin sign-in via OIDC", "issuer", ac.OIDCIssuer, "audience", ac.OIDCAudience)
+		case d.Cfg.Env == "dev":
+			resolver = adminapi.DevHeaders{PG: d.PG}
+			d.Log.Warn("admin sign-in via X-Actor headers (dev only; set OIDC_ISSUER to use Keycloak)")
+		default:
+			return fmt.Errorf("OIDC_ISSUER is required outside APP_ENV=dev")
+		}
 		wallets := wallet.New(d.Redis)
 		api := &adminapi.API{
 			PG: d.PG, Wallets: wallets, Secrets: box, Log: d.Log,
-			Credits: credit.New(d.PG, wallets),
-			Ledger:  &ledger.Service{PG: d.PG, Wallets: wallets},
-			DevAuth: d.Cfg.Env == "dev",
+			Credits:  credit.New(d.PG, wallets),
+			Ledger:   &ledger.Service{PG: d.PG, Wallets: wallets},
+			Resolver: resolver,
 		}
 		d.Log.Info("admin api listening", "addr", ac.Addr)
 		return service.ServeHTTP(ctx, &http.Server{

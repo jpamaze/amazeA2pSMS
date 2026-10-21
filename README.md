@@ -18,6 +18,8 @@ Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: cu
 | `cmd/rater` | Settles holds, writes the ledger in batches |
 | `cmd/migrate` | Applies `migrations/postgres` |
 | `cmd/devkafka`, `cmd/smpp-sim`, `cmd/http-sim`, `cmd/smpp-load`, `cmd/devseed` | Dev tools: in-memory Kafka, SMPP and HTTP vendor simulators, load generator, demo data |
+| `cmd/billing-check`, `scripts/signoff.sh`, `deploy/vm/` | 5,000 TPS sign-off kit for plain VMs ([docs/signoff-5k.md](docs/signoff-5k.md)) |
+| `cmd/admin-user` | Grants the first platform owner (then use the admin API) |
 | `internal/smpp/{pdu,session,gsm7}` | Own SMPP 3.3/3.4/5.0 library and GSM-7/UCS-2 encoding |
 | `internal/ingest`, `internal/msgstore`, `internal/routing`, `internal/connector`, `internal/dlr` | Message path packages |
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
@@ -60,7 +62,7 @@ Ports: SMPP 2775, HTTP 8080, admin 8081, HTTP-vendor DLR callback 8090, SMPP sim
 
 Without Docker, ClickHouse is optional: `pip install chdb` into a virtualenv and run `CHDB_PYTHON=<that python> scripts/dev-local.sh up` to add a ClickHouse stand-in and the ch-writer. `ROUTE=httpsim` sends the demo customer's traffic through the HTTP vendor simulator.
 
-Onboard a customer through the admin API (dev auth: `X-Actor-Account` = platform account ID, `X-Actor-User` = your name):
+Onboard a customer through the admin API. Sign-in is Keycloak (OIDC bearer tokens, see [docs/admin-auth.md](docs/admin-auth.md)); in local dev without Keycloak, send `X-Actor-Account` = platform account ID and `X-Actor-User` = your email instead:
 
 ```sh
 POST /v1/accounts                       {"name":"Acme","role":"customer","rate_card_id":"<GET /v1/rate-cards>"}
@@ -90,4 +92,4 @@ The script verifies the bundle, fast-forwards `main` and pushes. Pass `-NoPush` 
 
 ## Next
 
-The 5,000 TPS gate on production-shaped hardware (separate nodes, 3-broker Kafka, real ClickHouse), admin authentication (Keycloak), then phase 2 (billing and commercial) and phase 3 (DLT template matching, firewall, HLR/MNP, vendor failover).
+Run the 5,000 TPS sign-off on VMs ([docs/signoff-5k.md](docs/signoff-5k.md)); phase 2 (billing and commercial, [docs/phase2-billing.md](docs/phase2-billing.md)); then phase 3 (DLT template matching, firewall, HLR/MNP, vendor failover).

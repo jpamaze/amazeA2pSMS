@@ -1,0 +1,41 @@
+{
+  "realm": "amaze",
+  "enabled": true,
+  "displayName": "Amaze SMS",
+  "accessTokenLifespan": 600,
+  "ssoSessionIdleTimeout": 1800,
+  "bruteForceProtected": true,
+  "passwordPolicy": "length(12) and notUsername",
+  "clients": [
+    {
+      "clientId": "amaze-admin",
+      "name": "Amaze admin portal and API",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": { "pkce.code.challenge.method": "S256" },
+      "protocolMappers": [
+        {
+          "name": "audience amaze-admin",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "amaze-admin", "access.token.claim": "true", "id.token.claim": "false" }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "ops@amaze.local",
+      "email": "ops@amaze.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Platform",
+      "lastName": "Owner",
+      "credentials": [{ "type": "password", "value": "dev-only-change-me", "temporary": false }]
+    }
+  ]
+}
