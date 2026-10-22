@@ -47,6 +47,28 @@ type Compiled struct {
 	prefix string   // first literal word, a cheap pre-filter
 	words  []string // every literal word in order: a message must contain them all
 	lit    int      // literal length; a longer one is a more specific template
+	toks   []tok    // the body as tokens, for matching parts (MatchFragment)
+}
+
+// tok is one element of a template body: a literal character, a run of
+// whitespace, or a placeholder of min..max characters of a class.
+type tok struct {
+	kind     byte // 'l' literal, 's' whitespace run, 'p' placeholder
+	ch       rune
+	class    func(rune) bool
+	min, max int
+}
+
+func isSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
+
+var kindClass = map[string]tok{
+	KindVar:          {class: func(rune) bool { return true }, max: VarMax},
+	KindNumeric:      {class: func(r rune) bool { return r >= '0' && r <= '9' || r == '.' || r == ',' }, max: VarMax},
+	KindAlphanumeric: {class: func(r rune) bool { return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' }, max: VarMax},
+	KindURL:          {class: func(r rune) bool { return !isSpace(r) }, min: 1, max: 100},
+	KindURLOTT:       {class: func(r rune) bool { return !isSpace(r) }, min: 1, max: 100},
+	KindCallback:     {class: func(r rune) bool { return r >= '0' && r <= '9' || r == '+' || r == ' ' || r == '-' }, min: 4, max: 18},
+	KindEmail:        {class: func(r rune) bool { return !isSpace(r) }, min: 3, max: 165},
 }
 
 // Compile turns a DLT template body into a matcher. Literal text must match
@@ -62,6 +84,14 @@ func Compile(body string) (*Compiled, error) {
 	b.WriteString(`\A`)
 	last := 0
 	lit := func(s string) {
+		for _, r := range s {
+			switch {
+			case !isSpace(r):
+				c.toks = append(c.toks, tok{kind: 'l', ch: r})
+			case len(c.toks) == 0 || c.toks[len(c.toks)-1].kind != 's':
+				c.toks = append(c.toks, tok{kind: 's'})
+			}
+		}
 		c.lit += len(strings.Join(strings.Fields(s), " "))
 		c.words = append(c.words, strings.Fields(s)...)
 		parts := splitSpace(s)
@@ -80,6 +110,9 @@ func Compile(body string) (*Compiled, error) {
 			kind, pat = KindVar, kindPattern[KindVar]
 		}
 		b.WriteString(pat)
+		pt := kindClass[kind]
+		pt.kind = 'p'
+		c.toks = append(c.toks, pt)
 		c.kinds = append(c.kinds, kind)
 		last = m[1]
 	}
@@ -155,6 +188,67 @@ func (c *Compiled) Match(text string) ([]Value, bool) {
 		vals[i] = Value{Kind: k, Text: m[i+1]}
 	}
 	return vals, true
+}
+
+// MatchFragment reports whether text could be a contiguous piece of a
+// message matching the template: one part of a message the sender split
+// itself (UDH concatenation), which cannot be matched whole. It runs the
+// template as a non-deterministic automaton that may start and stop
+// anywhere. Placeholders are approximated by their character class and
+// maximum length.
+func (c *Compiled) MatchFragment(text string) bool {
+	type state struct{ i, n int } // at token i, n characters into it
+	// closure adds a state and the states reachable without input: past a
+	// placeholder that has its minimum, past a whitespace run already seen.
+	var closure func(set map[state]bool, st state)
+	closure = func(set map[state]bool, st state) {
+		if set[st] {
+			return
+		}
+		set[st] = true
+		if st.i >= len(c.toks) {
+			return
+		}
+		t := c.toks[st.i]
+		if (t.kind == 'p' && st.n >= t.min) || (t.kind == 's' && st.n > 0) {
+			closure(set, state{st.i + 1, 0})
+		}
+	}
+	cur := map[state]bool{}
+	for i, t := range c.toks {
+		closure(cur, state{i, 0})
+		if t.kind == 's' {
+			closure(cur, state{i, 1}) // a part may begin inside a whitespace run
+		}
+	}
+	for _, r := range text {
+		next := map[state]bool{}
+		for st := range cur {
+			if st.i >= len(c.toks) {
+				continue
+			}
+			t := c.toks[st.i]
+			switch t.kind {
+			case 'l':
+				if r == t.ch {
+					closure(next, state{st.i + 1, 0})
+				}
+			case 's':
+				if isSpace(r) {
+					closure(next, state{st.i, 1})
+				}
+			case 'p':
+				if t.class(r) && st.n < t.max {
+					closure(next, state{st.i, st.n + 1})
+				}
+			}
+		}
+		if len(next) == 0 {
+			return false
+		}
+		cur = next
+	}
+	return true
 }
 
 // compiled caches matchers by body, shared by every account snapshot.

@@ -1,16 +1,25 @@
 # Load balancers on LB_1 and LB_2 sharing the virtual IP LB_VIP (keepalived,
 # VRRP). On a public cloud use its network load balancer (TCP pass-through)
 # instead and skip this file.
-#   LB_PRIORITY=150 docker compose -f lb.yml --env-file .env up -d   # LB_1
-#   LB_PRIORITY=100 docker compose -f lb.yml --env-file .env up -d   # LB_2
+#   SELF=$LB_1 LB_PRIORITY=150 docker compose -f lb.yml --env-file .env up -d   # LB_1
+#   SELF=$LB_2 LB_PRIORITY=100 docker compose -f lb.yml --env-file .env up -d   # LB_2
 name: amaze-lb
 services:
   haproxy:
     image: haproxy:2.8
     network_mode: host
     restart: unless-stopped
-    environment: { APP_1: "${APP_1}", APP_2: "${APP_2}", APP_3: "${APP_3}", PG_1: "${PG_1}", PG_2: "${PG_2}", PG_3: "${PG_3}" }
-    volumes: ["./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    environment:
+      APP_1: "${APP_1}"
+      APP_2: "${APP_2}"
+      APP_3: "${APP_3}"
+      PG_1: "${PG_1}"
+      PG_2: "${PG_2}"
+      PG_3: "${PG_3}"
+      LB_PRIVATE_IP: "${SELF}"
+      LB_STATS_PASSWORD: "${LB_STATS_PASSWORD}"
+    # certs/smpp.pem: certificate chain + key for SMPP over TLS (port 3550).
+    volumes: ["./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro", "./lb/certs:/usr/local/etc/haproxy/certs:ro"]
     ulimits: { nofile: { soft: 262144, hard: 262144 } }
   keepalived:
     image: osixia/keepalived:2.0.20

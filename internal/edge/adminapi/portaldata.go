@@ -184,8 +184,18 @@ func (a *API) setAccountStatus(w http.ResponseWriter, r *http.Request, act actor
 		writeErr(w, http.StatusBadRequest, "status must be active or suspended")
 		return
 	}
-	if _, err := a.PG.Exec(r.Context(), `UPDATE accounts SET status = $2 WHERE id = $1 AND status <> 'closed'`, id, req.Status); err != nil {
+	// A suspension is lifted only by whoever imposed it, or the platform.
+	tag, err := a.PG.Exec(r.Context(), `UPDATE accounts
+		SET status = $2, suspended_by = CASE WHEN $2 = 'suspended' THEN $3::uuid END
+		WHERE id = $1 AND status <> 'closed'
+		  AND ($2 = 'suspended' OR suspended_by IS NULL OR suspended_by = $3::uuid OR $4)`,
+		id, req.Status, act.AccountID, act.Role == "platform")
+	if err != nil {
 		writeDBErr(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeErr(w, http.StatusForbidden, "this account was suspended by the platform; only the platform can reactivate it")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": req.Status, "note": "sending stops or resumes within one minute"})

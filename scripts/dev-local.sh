@@ -67,7 +67,7 @@ up)
   rm -f "$L"/*.log
   redis_primary=${REDIS_ADDRS%%,*}
   if [ -n "${REDIS_SENTINEL_MASTER:-}" ]; then
-    redis_primary=$(redis-cli -u "redis://$redis_primary" SENTINEL get-master-addr-by-name "$REDIS_SENTINEL_MASTER" | paste -sd:)
+    redis_primary=$(REDISCLI_AUTH=${REDIS_SENTINEL_PASSWORD:-} redis-cli -u "redis://$redis_primary" SENTINEL get-master-addr-by-name "$REDIS_SENTINEL_MASTER" | paste -sd:)
   fi
   REDISCLI_AUTH=${REDIS_PASSWORD:-} redis-cli -u "redis://$redis_primary" FLUSHALL >/dev/null
   psql "$POSTGRES_URL" -q -o /dev/null -c "SET client_min_messages=warning" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
@@ -97,7 +97,7 @@ up)
   [ -d "$ROOT/portal/out" ] || echo "portal not built (cd portal && npm ci && npm run build); admin-api serves the API only"
   start admin-api     OPS_ADDR=:9103 CLICKHOUSE_URL="$CH_URL" \
     PORTAL_DIR="$( [ -d "$ROOT/portal/out" ] && echo "$ROOT/portal/out")" PROMETHEUS_URL="${PROMETHEUS_BIN:+http://localhost:9090}" "$B/admin-api"
-  start alerter       OPS_ADDR=:9111 ALERT_EVERY=10s "$B/alerter"
+  start alerter       OPS_ADDR=:9111 ALERT_EVERY=10s WEBHOOK_ALLOW_PRIVATE=true "$B/alerter"
   start router        OPS_ADDR=:9104 "$B/router"
   start rater         OPS_ADDR=:9105 "$B/rater"
   start dlr-processor OPS_ADDR=:9106 DLR_TIMEOUT="${DLR_TIMEOUT:-72h}" "$B/dlr-processor"

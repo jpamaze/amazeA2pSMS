@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -35,6 +34,15 @@ type smppConfig struct {
 	TagTMChain    string `env:"DLT_TLV_TM_CHAIN" envDefault:"0x1402"`
 	// Refuse messages whose PE ID has no registered TM chain and that carry none.
 	RequireChain bool `env:"DLT_REQUIRE_TM_CHAIN" envDefault:"true"`
+
+	// Load balancers sending PROXY protocol headers (comma-separated addresses or CIDRs).
+	ProxyFrom []string `env:"SMPP_PROXY_PROTOCOL_FROM" envSeparator:","`
+	TLSCert   string   `env:"SMPP_TLS_CERT"`
+	TLSKey    string   `env:"SMPP_TLS_KEY"`
+	// Abuse limits for connections that have not bound.
+	MaxConnsPerIP int           `env:"SMPP_MAX_CONNS_PER_IP" envDefault:"64"`
+	BindTimeout   time.Duration `env:"SMPP_BIND_TIMEOUT" envDefault:"10s"`
+	MaxBindFails  int           `env:"SMPP_MAX_BIND_FAILS" envDefault:"10"`
 }
 
 func main() {
@@ -81,14 +89,15 @@ func main() {
 			Redis:    d.Redis,
 			Kafka:    d.Kafka,
 		}
-		srv := smppserver.New(smppserver.Config{SystemID: sc.SystemID, NodeID: sc.NodeID, DLT: tags},
+		srv := smppserver.New(smppserver.Config{SystemID: sc.SystemID, NodeID: sc.NodeID, DLT: tags,
+			MaxConnsPerIP: sc.MaxConnsPerIP, BindTimeout: sc.BindTimeout, MaxBindFails: sc.MaxBindFails},
 			auth.New(d.PG), pipeline, store, d.Log)
 
-		ln, err := net.Listen("tcp", sc.Addr)
+		ln, err := smppserver.Listen(smppserver.ListenConfig{Addr: sc.Addr, ProxyFrom: sc.ProxyFrom, CertFile: sc.TLSCert, KeyFile: sc.TLSKey})
 		if err != nil {
 			return err
 		}
-		d.Log.Info("smpp listening", "addr", sc.Addr, "node", sc.NodeID)
+		d.Log.Info("smpp listening", "addr", sc.Addr, "node", sc.NodeID, "tls", sc.TLSCert != "", "proxy_protocol_from", sc.ProxyFrom)
 		return srv.Serve(ctx, ln)
 	})
 }

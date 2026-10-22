@@ -13,3 +13,6 @@ deploy/vm/monitoring/prometheus.yml
 # Redis snapshot when redis-server runs from the repo; binaries from `go build ./cmd/<name>` at the root
 dump.rdb
 /billing-check
+
+# TLS keys for the load balancers
+deploy/ha/lb/certs/*.pem

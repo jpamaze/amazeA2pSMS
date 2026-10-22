@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"syscall"
@@ -163,9 +164,45 @@ type Dispatcher struct {
 	Workers int
 }
 
-// NewHTTPClient returns a client with a 10 s timeout. Unless allowPrivate,
-// it refuses to connect to loopback, private, link-local or unspecified
-// addresses, so a customer cannot point a webhook at internal services.
+// nonPublic are ranges no customer-chosen URL may reach: besides private,
+// loopback and link-local (checked by netip), shared address space (CGNAT,
+// where some clouds keep metadata services), IETF and benchmarking ranges,
+// reserved space, and IPv6 prefixes that embed IPv4 addresses.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+// PublicAddr reports whether a is an ordinary public unicast address.
+func PublicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	if !a.IsValid() || a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
+		a.IsUnspecified() || a.IsMulticast() || a.IsInterfaceLocalMulticast() {
+		return false
+	}
+	for _, p := range nonPublic {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// NewHTTPClient returns the client for customer-chosen URLs (receipt and
+// alert webhooks), with a 10 s timeout. Unless allowPrivate (dev only), it
+// connects only to public addresses, checked when dialling (so DNS
+// rebinding cannot get round it), and it never follows redirects.
 func NewHTTPClient(allowPrivate bool) *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	if !allowPrivate {
@@ -174,9 +211,7 @@ func NewHTTPClient(allowPrivate bool) *http.Client {
 			if err != nil {
 				return err
 			}
-			ip := net.ParseIP(host)
-			if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-				ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			if a, err := netip.ParseAddr(host); err != nil || !PublicAddr(a) {
 				return fmt.Errorf("webhook: refusing to connect to %s", host)
 			}
 			return nil

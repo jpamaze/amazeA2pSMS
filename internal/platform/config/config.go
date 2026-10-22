@@ -12,7 +12,7 @@ import (
 // Common holds settings shared by every service.
 type Common struct {
 	ServiceName string `env:"SERVICE_NAME"`
-	Env         string `env:"APP_ENV" envDefault:"dev"`
+	Env         string `env:"APP_ENV" envDefault:"production"` // dev-only behaviour needs APP_ENV=dev explicitly
 	LogLevel    string `env:"LOG_LEVEL" envDefault:"info"`
 	OpsAddr     string `env:"OPS_ADDR" envDefault:":9090"` // /healthz, /readyz, /metrics
 

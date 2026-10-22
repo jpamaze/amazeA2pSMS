@@ -143,3 +143,6 @@ ul.lines { margin: 0; padding: 8px 8px 8px 24px; max-height: 240px; overflow: au
 .check-bad { border-left: 4px solid var(--bad); }
 pre.json { margin: 0; padding: 12px; background: var(--bg); border-radius: 8px; overflow: auto; max-height: 320px; font-size: 12px; }
 .inline-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.stat { min-width: 0; }
+.stat-value { overflow-wrap: anywhere; }
+@media (max-width: 480px) { .stat-value { font-size: 20px; } }

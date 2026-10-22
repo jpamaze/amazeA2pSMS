@@ -6,8 +6,21 @@ name: ${NODE_NAME}
 restapi:
   listen: 0.0.0.0:8008
   connect_address: ${SELF}:8008
+  # Health checks (GET/OPTIONS /primary, /replica) stay open for HAProxy;
+  # changing endpoints (config, switchover, restart, reinit) need this.
+  authentication:
+    username: patroni
+    password: "${PATRONI_REST_PASSWORD}"
+ctl:
+  authentication:
+    username: patroni
+    password: "${PATRONI_REST_PASSWORD}"
 etcd3:
   hosts: [${PG_1}:2379, ${PG_2}:2379, ${PG_3}:2379]
+  # etcd holds the leader lock and the cluster configuration (pg_hba
+  # included): auth on (backup.sh etcd-auth), Patroni signs in as root.
+  username: root
+  password: "${ETCD_ROOT_PASSWORD}"
 bootstrap:
   dcs:
     ttl: 30

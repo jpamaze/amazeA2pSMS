@@ -89,7 +89,7 @@ func TestConcurrentTransfersNeverOverspend(t *testing.T) {
 	must(pool.QueryRow(ctx, `UPDATE wallets SET balance = balance + 5 WHERE account_id = $1 RETURNING balance`, reseller).Scan(&rb))
 	_ = s.Wallets.Credit(ctx, reseller, wallet.FromDecimal(decimal.NewFromInt(5)))
 	var booked string
-	must(pool.QueryRow(ctx, `SELECT split_part(idempotency_key, ':', 2) FROM ledger_entries WHERE kind = 'transfer_out' LIMIT 1`).Scan(&booked))
+	must(pool.QueryRow(ctx, `SELECT split_part(idempotency_key, ':', 3) FROM ledger_entries WHERE kind = 'transfer_out' LIMIT 1`).Scan(&booked))
 	if _, err := s.Transfer(ctx, Transfer{From: reseller, To: shop, Amount: decimal.NewFromInt(1), IdempotencyKey: booked, Actor: "t"}); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate: %v", err)
 	}

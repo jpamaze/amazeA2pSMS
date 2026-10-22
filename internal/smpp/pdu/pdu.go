@@ -47,6 +47,7 @@ const (
 	StatusInvPaswd      uint32 = 0x0000000E
 	StatusInvSysID      uint32 = 0x0000000F
 	StatusMsgQFul       uint32 = 0x00000014
+	StatusInvEsmClass   uint32 = 0x00000043
 	StatusSubmitFail    uint32 = 0x00000045
 	StatusThrottled     uint32 = 0x00000058
 	StatusInvDCS        uint32 = 0x00000104

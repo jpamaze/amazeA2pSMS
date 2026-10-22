@@ -68,7 +68,8 @@ func main() {
 			c.Transport = connector.NewHTTPTransport(p)
 			mux := http.NewServeMux()
 			mux.Handle("/dlr/"+cc.VendorID, connector.DLRHandler(p, c.JournalDLR, d.Log))
-			srv := &http.Server{Addr: cc.DLRAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			srv := &http.Server{Addr: cc.DLRAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 			go func() {
 				d.Log.Info("HTTP DLR endpoint listening", "addr", cc.DLRAddr, "path", "/dlr/"+cc.VendorID)
 				if err := service.ServeHTTP(ctx, srv); err != nil {

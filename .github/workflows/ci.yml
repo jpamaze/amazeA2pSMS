@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1" # weekly: new vulnerabilities in unchanged dependencies
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -40,6 +45,21 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: go build ./cmd/...
 
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck (known vulnerabilities reachable from our code)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+      - name: npm audit (portal, production dependencies)
+        working-directory: portal
+        run: npm audit --omit=dev --audit-level=high
+
   portal:
     runs-on: ubuntu-latest
     defaults:
@@ -61,7 +81,7 @@ jobs:
     needs: [test, portal]
     strategy:
       matrix:
-        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, alerter, migrate, wallet-resync, smpp-sim, http-sim, devseed]
+        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, alerter, migrate, wallet-resync, soak-report, smpp-sim, http-sim, devseed]
     steps:
       - uses: actions/checkout@v4
       - run: docker build ${{ matrix.service == 'admin-api' && '--target admin-api' || '' }} --build-arg SERVICE=${{ matrix.service }} -t amaze-sms/${{ matrix.service }}:${{ github.sha }} .

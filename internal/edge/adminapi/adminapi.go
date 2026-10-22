@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -225,7 +226,7 @@ func (a *API) createAccount(w http.ResponseWriter, r *http.Request, act actor) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" || (req.Role != "customer" && req.Role != "reseller") {
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 120 || hasControl(req.Name) || (req.Role != "customer" && req.Role != "reseller") {
 		writeErr(w, http.StatusBadRequest, "name and role (customer or reseller) are required")
 		return
 	}
@@ -568,4 +569,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// hasControl reports control characters (line breaks, tabs, NUL...): names
+// end up in e-mail headers, CSV files and logs.
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
 }

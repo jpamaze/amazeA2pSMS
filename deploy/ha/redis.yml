@@ -2,6 +2,8 @@
 # starts as primary; Sentinel moves the role on failure (quorum 2 of 3) and
 # the platform follows it (REDIS_SENTINEL_MASTER=amaze).
 #   SELF=$REDIS_1 docker compose -f redis.yml --env-file .env up -d
+# Sentinel has its own password (REDIS_SENTINEL_PASSWORD): otherwise anyone
+# who reaches port 26379 could point the platform at a Redis of theirs.
 # Writes need one replica in sync (min-replicas-to-write 1, at most 10 s
 # behind): a primary cut off from both replicas stops taking writes rather
 # than accept writes a failover would lose.
@@ -35,6 +37,7 @@ services:
     command:
       - |
         [ -f /data/sentinel.conf ] || printf '%s\n' "port 26379" "dir /data" \
+          "requirepass ${REDIS_SENTINEL_PASSWORD}" "sentinel sentinel-pass ${REDIS_SENTINEL_PASSWORD}" \
           "sentinel announce-ip ${SELF}" "sentinel resolve-hostnames no" \
           "sentinel monitor amaze ${REDIS_1} 6379 2" "sentinel auth-pass amaze ${REDIS_PASSWORD}" \
           "sentinel down-after-milliseconds amaze 5000" "sentinel failover-timeout amaze 60000" \

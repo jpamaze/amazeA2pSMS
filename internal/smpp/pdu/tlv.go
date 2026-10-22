@@ -68,10 +68,13 @@ func (t *TLVs) SetString(tag uint16, s string) {
 func (t TLVs) encode(w *bytes.Buffer) {
 	var hdr [4]byte
 	for _, v := range t {
+		// A TLV length is 16 bits; a longer value would corrupt the PDU.
+		// Callers keep values far below this (a PDU is at most 64 KiB).
+		val := v.Value[:min(len(v.Value), 0xFFFF)]
 		binary.BigEndian.PutUint16(hdr[0:], v.Tag)
-		binary.BigEndian.PutUint16(hdr[2:], uint16(len(v.Value)))
+		binary.BigEndian.PutUint16(hdr[2:], uint16(len(val)))
 		w.Write(hdr[:])
-		w.Write(v.Value)
+		w.Write(val)
 	}
 }
 

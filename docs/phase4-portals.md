@@ -35,13 +35,13 @@ Within an account, the user's role still limits actions: viewer and support read
 
 ## White-label
 
-A reseller sets its display name, logo (an upload under 200 KB is stored as a data URI, or an https URL), colour, support e-mail and optionally a portal domain.
+A reseller sets its display name, logo (an upload under 200 KB is stored as a data URI, or an https URL), colour and support e-mail. Its portal domain is set by the platform (since phase 5: nobody else may claim a host name).
 - **Who sees it:** its sub-accounts see the reseller's brand everywhere, including alert e-mails, and never the platform's.
 - **On a reseller domain:** the sign-in page is branded before anyone signs in, because the brand is found by the `Host` header.
 - **Fallbacks:** direct customers see the platform's brand (set on the platform account), otherwise the built-in default.
 
 To bring a reseller domain live:
-1. The reseller points a CNAME at the portal host.
+1. The reseller points a CNAME at the portal host, and the platform sets the domain on the reseller's branding (Branding page, "Brand of" the reseller, or `PUT /v1/accounts/{reseller}/branding` as the platform).
 2. The platform adds a TLS certificate for it on the load balancer.
 3. The platform adds `https://<domain>/callback/` as a redirect URI, and `https://<domain>/login/` as a post-logout redirect URI, to the `amaze-portal` client in Keycloak. Wildcard redirect URIs are deliberately not used: a code could be sent to any site.
 

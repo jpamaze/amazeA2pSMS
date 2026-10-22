@@ -101,7 +101,7 @@ func TestDLTRegistrationsAndCheck(t *testing.T) {
 		t.Fatalf("suspended template: %v", out)
 	}
 	code, body = call(cust, "GET", pe+"/templates?header=banksi", "")
-	expect("list by header", 200, code, nil)
+	expect("list by header", 200, code, body)
 
 	// Others cannot read or change this account's DLT data; only the platform switches DLT off.
 	code, body = call(other, "GET", base, "")

@@ -88,7 +88,13 @@ func TestPortalEndpoints(t *testing.T) {
 	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+res+"/branding", `{"name":"BlueText SMS","primary_color":"#0e7c66","domain":"SMS.BlueText.example","logo":"javascript:alert(1)"}`)
 	expect("bad logo", 400, code, body)
 	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+res+"/branding", `{"name":"BlueText SMS","primary_color":"#0e7c66","domain":"SMS.BlueText.example","support_email":"help@bluetext.example"}`)
-	expect("reseller brand", 200, code, body)
+	expect("a reseller cannot claim a domain", 403, code, body)
+	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+res+"/branding", "{\"name\":\"X\r\nBcc: victim@x.in\"}")
+	expect("no line breaks in a brand name (it goes into e-mail subjects)", 400, code, body)
+	code, body = call(plat, "ops@x", "PUT", "/v1/accounts/"+res+"/branding", `{"name":"BlueText SMS","primary_color":"#0e7c66","domain":"SMS.BlueText.example","support_email":"help@bluetext.example"}`)
+	expect("the platform sets the reseller's domain", 200, code, body)
+	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+res+"/branding", `{"name":"BlueText SMS","primary_color":"#0e7c66","domain":"sms.bluetext.example","support_email":"help@bluetext.example"}`)
+	expect("reseller edits its brand, domain unchanged", 200, code, body)
 	code, body = call(direct, "d@x", "PUT", "/v1/accounts/"+plat+"/branding", `{"name":"Z","domain":"sms.bluetext.example"}`)
 	expect("other account's brand", 403, code, body)
 	code, body = call(plat, "ops@x", "PUT", "/v1/accounts/"+plat+"/branding", `{"name":"Amaze","domain":"sms.bluetext.example"}`)
@@ -140,6 +146,12 @@ func TestPortalEndpoints(t *testing.T) {
 	expect("reactivate", 200, code, body)
 	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+res+"/status", `{"status":"suspended"}`)
 	expect("suspend yourself", 403, code, body)
+	code, body = call(plat, "ops@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"suspended"}`)
+	expect("platform suspends a reseller's sub-account", 200, code, body)
+	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"active"}`)
+	expect("the reseller cannot lift a platform suspension", 403, code, body)
+	code, body = call(plat, "ops@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"active"}`)
+	expect("the platform can", 200, code, body)
 
 	// API keys: self-service create, list without secrets, revoke once.
 	code, body = call(shop, "s@x", "POST", "/v1/accounts/"+shop+"/api-keys", `{"name":"prod"}`)
@@ -216,5 +228,36 @@ func TestPortalHandler(t *testing.T) {
 	get("/v1/me")
 	if !apiHit {
 		t.Fatal("/v1 goes to the API")
+	}
+}
+
+func TestSecureHeaders(t *testing.T) {
+	h := SecureHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "https://sso.example.com/realms/amaze")
+	get := func(p string, hdr ...string) http.Header {
+		r := httptest.NewRequest("GET", p, nil)
+		if len(hdr) == 2 {
+			r.Header.Set(hdr[0], hdr[1])
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Header()
+	}
+	api := get("/v1/accounts/x/statement")
+	if api.Get("Cache-Control") != "no-store" || api.Get("X-Content-Type-Options") != "nosniff" || api.Get("Strict-Transport-Security") != "" {
+		t.Fatalf("api headers: %v", api)
+	}
+	page := get("/messages/", "X-Forwarded-Proto", "https")
+	csp := page.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "connect-src 'self' https://sso.example.com;") || !strings.Contains(csp, "frame-ancestors 'none'") ||
+		page.Get("Strict-Transport-Security") == "" {
+		t.Fatalf("page headers: %v", page)
+	}
+}
+
+func TestCSVText(t *testing.T) {
+	for in, want := range map[string]string{"=HYPERLINK(\"x\")": "'=HYPERLINK(\"x\")", "+1": "'+1", "@SUM(A1)": "'@SUM(A1)", "-2+3": "'-2+3", "UTR 123": "UTR 123", "": ""} {
+		if got := csvText(in); got != want {
+			t.Errorf("%q: %q", in, got)
+		}
 	}
 }

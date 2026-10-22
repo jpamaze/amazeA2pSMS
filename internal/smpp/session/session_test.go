@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,5 +134,60 @@ func TestResponseTimeout(t *testing.T) {
 	_, cli := pair(t, srvCfg, Config{ResponseTimeout: 50 * time.Millisecond})
 	if _, err := cli.Send(context.Background(), pdu.SubmitSM, &pdu.SM{Dest: "1"}); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("want ErrTimeout, got %v", err)
+	}
+}
+
+// A peer that streams requests and never reads the replies must not make
+// the session start a goroutine per request (memory exhaustion before any
+// bind): replies wait for in-flight slots and the read loop stalls.
+func TestNonReadingPeerIsBounded(t *testing.T) {
+	a, b := net.Pipe() // writes block until the other side reads
+	s := New(a, Config{MaxInflight: 8, EnquireInterval: 200 * time.Millisecond, ResponseTimeout: 200 * time.Millisecond})
+	s.Start()
+	defer s.Close()
+	base := runtime.NumGoroutine()
+	frame := pdu.Encode(&pdu.PDU{CommandID: pdu.EnquireLink, Seq: 1}, pdu.V34)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := b.Write(frame); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if n := runtime.NumGoroutine() - base; n > 20 {
+		t.Fatalf("%d extra goroutines for a peer that does not read", n)
+	}
+	select {
+	case <-s.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("session should close a peer that stopped reading")
+	}
+	close(stop)
+	b.Close()
+}
+
+// A handler panic closes that session, not the process.
+func TestHandlerPanicClosesSession(t *testing.T) {
+	a, b := net.Pipe()
+	s := New(a, Config{Handler: func(*Session, *pdu.PDU) { panic("boom") }})
+	s.Start()
+	go func() {
+		_, _ = b.Write(pdu.Encode(&pdu.PDU{CommandID: pdu.SubmitSM, Seq: 1, Body: &pdu.SM{Dest: "1"}}, pdu.V34))
+	}()
+	go func() { _, _ = io.Copy(io.Discard, b) }()
+	select {
+	case <-s.Done():
+		if s.Err() == nil || !strings.Contains(s.Err().Error(), "panic") {
+			t.Fatalf("err %v", s.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session should close after a handler panic")
 	}
 }

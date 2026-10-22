@@ -148,6 +148,12 @@ func TestOIDCSignInAndRoles(t *testing.T) {
 	if code, _ := call("GET", "/v1/me", iss.token(t, iss.key, map[string]any{"email": "owner@amaze.in", "email_verified": false}), ""); code != 403 {
 		t.Errorf("unverified email: want 403, got %d", code)
 	}
+	if code, _ := call("GET", "/v1/me", iss.token(t, iss.key, map[string]any{"email": "owner@amaze.in", "email_verified": nil}), ""); code != 403 {
+		t.Fatalf("a token that does not say the e-mail is verified: %d", code)
+	}
+	if _, err := NewOIDC(ctx, pool, iss.srv.URL, " , "); err == nil {
+		t.Fatal("an empty audience would accept tokens issued to any client")
+	}
 
 	// Changes are audited, reads are not.
 	var n int

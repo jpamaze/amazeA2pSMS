@@ -14,7 +14,7 @@ import { RoutingBadge } from "@/components/VendorState";
 import { Badge, Button, Card, Field, Input, Loading, Notice, Select, Table, Tabs, TextArea, useAction } from "@/components/ui";
 
 type Bind = { id: string; host: string; port: number; tls: boolean; system_id: string; system_type: string; smpp_version: string; bind_type: string; window_size: number; tps_limit: number; tlv_profile: Record<string, string>; enabled: boolean };
-type Profile = { base_url: string; auth: unknown; request_template: unknown; response_mapping: unknown; dlr_mapping: unknown; tps_limit: number; concurrency: number; dlr_path: string; has_secret: boolean };
+type Profile = { base_url: string; auth: unknown; request_template: unknown; response_mapping: unknown; dlr_mapping: unknown; tps_limit: number; concurrency: number; dlr_path?: string; has_secret: boolean };
 type Vendor = { id: string; name: string; protocol: string; status: string; created_at: string; binds: Bind[]; http_profile?: Profile; routing?: Routing; connectors?: Report[] | null };
 type Cost = { mcc: string; mnc: string; category: string; cost: string; valid_from: string; state: string };
 
@@ -177,7 +177,9 @@ function HTTPProfile({ v, admin, done }: { v: Vendor; admin: boolean; done: () =
         {admin && <div className="row"><Button type="submit" busy={a.busy}>Save profile</Button></div>}
         <Notice>{a.error}</Notice><Notice kind="ok">{a.ok}</Notice>
       </form>
-      {p && <p className="small">Receipt URL to give the vendor: the connector&apos;s DLR listener (<code>DLR_ADDR</code>) at <code>{p.dlr_path}</code></p>}
+      {p && (p.dlr_path
+        ? <p className="small">Receipt URL to give the vendor: the connector&apos;s DLR listener (<code>DLR_ADDR</code>) at <code>{p.dlr_path}</code></p>
+        : <p className="small muted">The receipt URL (it carries the vendor&apos;s token) is shown to admins.</p>)}
     </Card>
   );
 }

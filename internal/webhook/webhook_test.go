@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -104,5 +105,19 @@ func TestPrivateAddressesBlocked(t *testing.T) {
 	_, err := NewHTTPClient(false).Get(srv.URL) // 127.0.0.1
 	if err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("loopback webhook must be refused, got %v", err)
+	}
+}
+
+func TestPublicAddr(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"8.8.8.8": true, "2606:4700::1111": true,
+		"127.0.0.1": false, "10.1.2.3": false, "172.16.0.1": false, "192.168.1.1": false,
+		"169.254.169.254": false, "100.100.100.200": false, "0.0.0.0": false, "198.18.0.1": false,
+		"::1": false, "fe80::1": false, "fd00::1": false, "::ffff:10.0.0.1": false,
+		"64:ff9b::a00:1": false, "2002:a00:1::": false, "240.0.0.1": false,
+	} {
+		if got := PublicAddr(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("%s: public=%v, want %v", addr, got, want)
+		}
 	}
 }

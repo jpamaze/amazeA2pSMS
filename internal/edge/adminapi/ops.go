@@ -147,8 +147,13 @@ func (a *API) getVendor(w http.ResponseWriter, r *http.Request, act actor) {
 		dlr_token, secret_enc IS NOT NULL FROM http_vendor_profiles WHERE vendor_id = $1`, id).
 		Scan(&base, &auth, &req, &resp, &dlr, &tps, &conc, &token, &hasSecret)
 	if err == nil {
-		out["http_profile"] = map[string]any{"base_url": base, "auth": auth, "request_template": req, "response_mapping": resp,
-			"dlr_mapping": dlr, "tps_limit": tps, "concurrency": conc, "dlr_path": "/dlr/" + id + "?token=" + token, "has_secret": hasSecret}
+		hp := map[string]any{"base_url": base, "auth": auth, "request_template": req, "response_mapping": resp,
+			"dlr_mapping": dlr, "tps_limit": tps, "concurrency": conc, "has_secret": hasSecret}
+		// The token authenticates the vendor's receipts: admins only.
+		if act.Perm >= PermAdmin {
+			hp["dlr_path"] = "/dlr/" + id + "?token=" + token
+		}
+		out["http_profile"] = hp
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		writeDBErr(w, err)
 		return

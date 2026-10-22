@@ -192,7 +192,11 @@ func (b *Bind) Submit(ctx context.Context, sm *pdu.SM) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	id := resp.Body.(*pdu.SMResp).MessageID
+	smr, ok := resp.Body.(*pdu.SMResp)
+	if !ok {
+		return "", fmt.Errorf("connector: vendor answered submit_sm with command 0x%08x", resp.CommandID)
+	}
+	id := smr.MessageID
 	if id == "" {
 		return "", errors.New("connector: vendor returned empty message_id")
 	}

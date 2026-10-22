@@ -104,8 +104,13 @@ name: pg$n
 restapi:
   listen: 127.0.0.1:$rest
   connect_address: 127.0.0.1:$rest
+  authentication: {username: patroni, password: $PASS}
+ctl:
+  authentication: {username: patroni, password: $PASS}
 etcd3:
   hosts: [127.0.0.1:2379, 127.0.0.1:2389, 127.0.0.1:2399]
+  username: root
+  password: $PASS
 bootstrap:
   dcs:
     ttl: 20
@@ -177,6 +182,8 @@ redis_up() {
     cat >"$D/redis$n/sentinel.conf" <<EOF
 port $port
 dir $D/redis$n
+requirepass $PASS
+sentinel sentinel-pass $PASS
 sentinel monitor amaze 127.0.0.1 6380 2
 sentinel auth-pass amaze $PASS
 sentinel down-after-milliseconds amaze 3000
@@ -330,6 +337,10 @@ up)
       --initial-cluster-state new --initial-cluster-token amaze
   done
   wait_for "etcd" etcdctl --endpoints=127.0.0.1:2379 endpoint health
+  # As in production: etcd holds the cluster's configuration, so it needs auth.
+  ETCDCTL_API=3 etcdctl --endpoints=127.0.0.1:2379 user add root --new-user-password="$PASS" --interactive=false >/dev/null
+  ETCDCTL_API=3 etcdctl --endpoints=127.0.0.1:2379 user grant-role root root >/dev/null
+  ETCDCTL_API=3 etcdctl --endpoints=127.0.0.1:2379 auth enable >/dev/null
 
   # PostgreSQL under Patroni: pg1 bootstraps, the others clone it.
   for n in 1 2 3; do mkdir -p "$D/pg$n/lock" "$D/pg$n/spool"; pg_conf "$n"; done
@@ -353,7 +364,7 @@ up)
 env)
   cat <<EOF
 export POSTGRES_URL='postgres://sms:$PASS@127.0.0.1:5441,127.0.0.1:5442,127.0.0.1:5443/sms?sslmode=disable&target_session_attrs=read-write&connect_timeout=3'
-export REDIS_ADDRS=127.0.0.1:26380,127.0.0.1:26381,127.0.0.1:26382 REDIS_SENTINEL_MASTER=amaze REDIS_PASSWORD=$PASS
+export REDIS_ADDRS=127.0.0.1:26380,127.0.0.1:26381,127.0.0.1:26382 REDIS_SENTINEL_MASTER=amaze REDIS_PASSWORD=$PASS REDIS_SENTINEL_PASSWORD=$PASS
 export CLICKHOUSE_URL=http://127.0.0.1:8124,http://127.0.0.1:8125,http://127.0.0.1:8126 CLICKHOUSE_PASSWORD=$PASS
 export PGPASSWORD=$PASS
 EOF
@@ -361,7 +372,7 @@ EOF
 status)
   echo "PostgreSQL (Patroni):"
   "$PATRONI" --version >/dev/null 2>&1 && runuser -u postgres -- "$(dirname "$(command -v "$PATRONI")")/patronictl" -c "$D/pg1/patroni.yml" list 2>/dev/null || true
-  echo "Redis primary (Sentinel): $(redis-cli -p 26380 SENTINEL get-master-addr-by-name amaze 2>/dev/null | paste -sd:)"
+  echo "Redis primary (Sentinel): $(redis-cli -p 26380 -a "$PASS" --no-auth-warning SENTINEL get-master-addr-by-name amaze 2>/dev/null | paste -sd:)"
   for n in 1 2 3; do
     printf 'ClickHouse ch%s: %s\n' "$n" "$(curl -s "http://127.0.0.1:$((8123 + n))/" --data-binary "SELECT 'up, readonly replicas: ' || toString(countIf(is_readonly)) FROM system.replicas" 2>/dev/null || echo down)"
   done

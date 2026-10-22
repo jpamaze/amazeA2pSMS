@@ -48,8 +48,7 @@ func main() {
 		if err != nil {
 			return
 		}
-		var s *session.Session
-		s = session.New(conn, session.Config{
+		s := session.New(conn, session.Config{
 			Window:  100,
 			Handler: sim.handle,
 			OnClose: func(s *session.Session, _ error) { sim.drop(s) },

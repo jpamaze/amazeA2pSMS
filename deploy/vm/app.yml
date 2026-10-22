@@ -13,7 +13,7 @@ x-svc: &svc
   restart: unless-stopped
   ulimits: { nofile: { soft: 262144, hard: 262144 } }
   environment: &env
-    APP_ENV: staging
+    APP_ENV: ${APP_ENV:-staging}  # production in deploy/ha/env.example (devseed refuses it)
     LOG_LEVEL: info
     NODE_ID: ${NODE:-app}
     # The single-node sign-off layout; the HA layout (deploy/ha/env.example)
@@ -22,11 +22,12 @@ x-svc: &svc
     REDIS_ADDRS: ${REDIS_ADDRS:-${DATA_1}:6379}
     REDIS_SENTINEL_MASTER: ${REDIS_SENTINEL_MASTER:-}
     REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    REDIS_SENTINEL_PASSWORD: ${REDIS_SENTINEL_PASSWORD:-}
     KAFKA_BROKERS: ${KAFKA_1}:9092,${KAFKA_2}:9092,${KAFKA_3}:9092
     SECRETS_KEY: ${SECRETS_KEY}
     CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://${CH_1}:8123}
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-    PPROF: "true"
+    PPROF: ${PPROF:-false}  # profiling endpoints on the ops port; turn on only while investigating
 
 x-build: &build
   context: ../..
@@ -36,7 +37,11 @@ services:
     <<: *svc
     image: ${REGISTRY}/smpp-server:${TAG}
     build: { <<: *build, args: { SERVICE: smpp-server } }
-    environment: { <<: *env, OPS_ADDR: ":9101" }
+    environment:
+      <<: *env
+      OPS_ADDR: ":9101"
+      # Behind the HA load balancers: the client address comes in a PROXY header from them.
+      SMPP_PROXY_PROTOCOL_FROM: ${SMPP_PROXY_PROTOCOL_FROM:-}
   http-api:
     <<: *svc
     image: ${REGISTRY}/http-api:${TAG}
@@ -141,7 +146,7 @@ services:
     restart: "no"
     image: ${REGISTRY}/devseed:${TAG}
     build: { <<: *build, args: { SERVICE: devseed } }
-    command: ["-sim-host", "${SIM_1}", "-sim-binds", "8", "-http-sim-url", "http://${SIM_1}:2777", "-balance", "10000000", "-tps", "20000"]
+    command: ["-sim-host", "${SIM_1}", "-sim-binds", "8", "-http-sim-url", "http://${SIM_1}:2777", "-balance", "${SEED_BALANCE:-10000000}", "-tps", "20000"]
   billing-check:
     <<: *svc
     profiles: [init]
@@ -156,3 +161,10 @@ services:
     restart: "no"
     image: ${REGISTRY}/wallet-resync:${TAG}
     build: { <<: *build, args: { SERVICE: wallet-resync } }
+  # Judges a soak test from Prometheus (scripts/signoff.sh soak-report).
+  soak-report:
+    <<: *svc
+    profiles: [ops]
+    restart: "no"
+    image: ${REGISTRY}/soak-report:${TAG}
+    build: { <<: *build, args: { SERVICE: soak-report } }

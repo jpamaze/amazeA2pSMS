@@ -13,11 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/smtp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -82,7 +84,8 @@ func (s *SMTP) Send(ctx context.Context, to []string, subject, body string) erro
 		return fmt.Errorf("smtp: %w", err)
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n",
-		s.From, strings.Join(to, ", "), subject, time.Now().Format(time.RFC1123Z), strings.ReplaceAll(body, "\n", "\r\n"))
+		headerValue(s.From), headerValue(strings.Join(to, ", ")), mime.QEncoding.Encode("utf-8", headerValue(subject)),
+		time.Now().Format(time.RFC1123Z), strings.ReplaceAll(body, "\n", "\r\n"))
 	if _, err := wc.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp: %w", err)
 	}
@@ -90,6 +93,17 @@ func (s *SMTP) Send(ctx context.Context, to []string, subject, body string) erro
 		return fmt.Errorf("smtp: %w", err)
 	}
 	return c.Quit()
+}
+
+// headerValue drops control characters, so a value (a reseller's brand
+// name in the subject) cannot end the header and inject others or a body.
+func headerValue(v string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, v)
 }
 
 // SMS sends alert texts through the platform's own HTTP API, as an account

@@ -418,7 +418,7 @@ func (a *API) statement(w http.ResponseWriter, r *http.Request, act actor) {
 		cw := csv.NewWriter(w)
 		_ = cw.Write([]string{"at", "kind", "amount", "balance_after", "reference", "messages", "counterparty"})
 		for _, l := range lines {
-			_ = cw.Write([]string{l.At, l.Kind, l.Amount, l.Balance, l.Reference, fmt.Sprint(l.Messages), l.Counterparty})
+			_ = cw.Write([]string{l.At, l.Kind, l.Amount, l.Balance, csvText(l.Reference), fmt.Sprint(l.Messages), csvText(l.Counterparty)})
 		}
 		cw.Flush()
 		return
@@ -472,4 +472,13 @@ func (a *API) usage(w http.ResponseWriter, r *http.Request, act actor) {
 			"not_delivered": row[4], "via_sub_accounts": row[5], "charged": row[6]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"account_id": id, "from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339), "days": out})
+}
+
+// csvText keeps free text (references other accounts typed) from being run
+// as a formula when the file is opened in a spreadsheet.
+func csvText(v string) string {
+	if v != "" && strings.ContainsRune("=+-@\t\r", rune(v[0])) {
+		return "'" + v
+	}
+	return v
 }

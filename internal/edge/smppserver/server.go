@@ -51,6 +51,11 @@ type Config struct {
 	DLT             DLTTags
 	EnquireInterval time.Duration
 	Window          int // outstanding deliver_sm per receiver bind
+
+	// Abuse limits for connections that are not (yet) customers.
+	MaxConnsPerIP int           // open connections from one address (default 64)
+	BindTimeout   time.Duration // close a connection not bound by then (default 10 s)
+	MaxBindFails  int           // failed binds from one address per minute before it is refused for 5 minutes (default 10)
 }
 
 // Authenticator is the subset of auth.Authenticator the server needs.
@@ -77,6 +82,17 @@ type Server struct {
 	pumps  map[string]context.CancelFunc
 	rr     map[string]int
 	ctx    context.Context
+
+	binding map[*session.Session]bool // a bind is being authenticated
+	conns   map[netip.Addr]int        // open connections per remote address
+	addrOf  map[*session.Session]netip.Addr
+	fails   map[netip.Addr]*bindFails
+}
+
+// bindFails counts failed binds from one address in the current minute.
+type bindFails struct {
+	n            int
+	window, till time.Time // counting since window; refused until till
 }
 
 type bindKind int
@@ -112,10 +128,21 @@ func New(cfg Config, a Authenticator, acc Acceptor, store *msgstore.Store, log *
 	if cfg.Window == 0 {
 		cfg.Window = 10
 	}
+	if cfg.MaxConnsPerIP == 0 {
+		cfg.MaxConnsPerIP = 64
+	}
+	if cfg.BindTimeout == 0 {
+		cfg.BindTimeout = 10 * time.Second
+	}
+	if cfg.MaxBindFails == 0 {
+		cfg.MaxBindFails = 10
+	}
 	return &Server{
 		cfg: cfg, auth: a, accept: acc, store: store, log: log,
 		byAcct: map[string][]*session.Session{},
 		all:    map[*session.Session]struct{}{}, pumps: map[string]context.CancelFunc{}, rr: map[string]int{},
+		binding: map[*session.Session]bool{}, conns: map[netip.Addr]int{}, addrOf: map[*session.Session]netip.Addr{},
+		fails: map[netip.Addr]*bindFails{},
 	}
 }
 
@@ -137,16 +164,30 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
+		remote := addrOf(conn.RemoteAddr())
+		s.mu.Lock()
+		if s.conns[remote] >= s.cfg.MaxConnsPerIP {
+			s.mu.Unlock()
+			conn.Close()
+			metrics.Refused.WithLabelValues("smpp", "connection_limit").Inc()
+			continue
+		}
 		sess := session.New(conn, session.Config{
 			Window:          s.cfg.Window,
 			EnquireInterval: s.cfg.EnquireInterval,
 			Handler:         s.handle,
 			OnClose:         s.onClose,
 		})
-		s.mu.Lock()
 		s.all[sess] = struct{}{}
+		s.conns[remote]++
+		s.addrOf[sess] = remote
 		s.mu.Unlock()
 		sess.Start()
+		time.AfterFunc(s.cfg.BindTimeout, func() {
+			if sess.Data() == nil {
+				sess.Close() // connected but never bound
+			}
+		})
 	}
 }
 
@@ -178,10 +219,21 @@ func (s *Server) handle(sess *session.Session, req *pdu.PDU) {
 
 func (s *Server) bind(sess *session.Session, req *pdu.PDU) {
 	respBody := &pdu.BindResp{SystemID: s.cfg.SystemID}
-	if sess.Data() != nil {
+	// One bind per connection: binds pipelined on one connection would
+	// otherwise all pass this check and each take a bind slot.
+	s.mu.Lock()
+	if sess.Data() != nil || s.binding[sess] {
+		s.mu.Unlock()
 		_ = sess.Respond(req, pdu.StatusAlyBnd, nil)
 		return
 	}
+	s.binding[sess] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.binding, sess)
+		s.mu.Unlock()
+	}()
 	b := req.Body.(*pdu.Bind)
 	version := pdu.V34
 	switch {
@@ -192,23 +244,22 @@ func (s *Server) bind(sess *session.Session, req *pdu.PDU) {
 	}
 	sess.SetVersion(version)
 
-	remote := netip.Addr{}
-	if ap, err := netip.ParseAddrPort(sess.RemoteAddr().String()); err == nil {
-		remote = ap.Addr()
+	remote := addrOf(sess.RemoteAddr())
+	if s.bindBlocked(remote) {
+		metrics.Refused.WithLabelValues("smpp", "bind_throttled").Inc()
+		_ = sess.Respond(req, pdu.StatusBindFail, nil)
+		time.AfterFunc(100*time.Millisecond, sess.Close)
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cred, err := s.auth.SMPP(ctx, b.SystemID, b.Password, remote)
 	if err != nil {
-		status := pdu.StatusBindFail
-		switch {
-		case errors.Is(err, auth.ErrInvalidCredentials):
-			status = pdu.StatusInvPaswd
-		case errors.Is(err, auth.ErrIPNotAllowed), errors.Is(err, auth.ErrAccountInactive):
-			status = pdu.StatusBindFail
-		}
+		// One status for every refusal: a different answer for a right
+		// password from a wrong address would confirm the password.
+		s.bindFailed(remote)
 		s.log.Info("bind refused", "system_id", b.SystemID, "remote", remote.String(), "err", err)
-		_ = sess.Respond(req, status, nil)
+		_ = sess.Respond(req, pdu.StatusBindFail, nil)
 		time.AfterFunc(100*time.Millisecond, sess.Close)
 		return
 	}
@@ -259,6 +310,12 @@ func (s *Server) onClose(sess *session.Session, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.all, sess)
+	if a, ok := s.addrOf[sess]; ok {
+		if s.conns[a]--; s.conns[a] <= 0 {
+			delete(s.conns, a)
+		}
+		delete(s.addrOf, sess)
+	}
 	st, _ := sess.Data().(*bindState)
 	if st == nil {
 		return
@@ -363,6 +420,8 @@ func statusFor(err error) uint32 {
 		return pdu.StatusInvDstAdr
 	case errors.Is(err, ingest.ErrInvalidSender):
 		return pdu.StatusInvSrcAdr
+	case errors.Is(err, ingest.ErrBadUDH):
+		return pdu.StatusInvEsmClass
 	case errors.Is(err, ingest.ErrEmptyMessage), errors.Is(err, ingest.ErrTooLong):
 		return pdu.StatusInvMsgLen
 	case errors.Is(err, ingest.ErrInsufficient):
@@ -511,4 +570,44 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func addrOf(a net.Addr) netip.Addr {
+	if ap, err := netip.ParseAddrPort(a.String()); err == nil {
+		return ap.Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
+// bindBlocked reports whether an address has failed too many binds lately.
+func (s *Server) bindBlocked(a netip.Addr) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.fails[a]
+	return f != nil && time.Now().Before(f.till)
+}
+
+// bindFailed counts a failed bind; MaxBindFails in a minute blocks the
+// address for five minutes.
+func (s *Server) bindFailed(a netip.Addr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	f := s.fails[a]
+	if f == nil || now.Sub(f.window) > time.Minute {
+		if len(s.fails) > 100_000 { // bounded memory under a distributed attack
+			for k, v := range s.fails {
+				if now.After(v.till) && now.Sub(v.window) > time.Minute {
+					delete(s.fails, k)
+				}
+			}
+		}
+		f = &bindFails{window: now}
+		s.fails[a] = f
+	}
+	f.n++
+	if f.n >= s.cfg.MaxBindFails {
+		f.till = now.Add(5 * time.Minute)
+		s.log.Warn("binds from this address refused for 5 minutes after repeated failures", "remote", a.String(), "failures", f.n)
+	}
 }

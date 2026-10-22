@@ -2,6 +2,13 @@
 #   NODE_NAME=pg-1 SELF=$PG_1 docker compose -f postgres.yml --env-file .env up -d
 # etcd (the Patroni consensus store) runs on the same three VMs. Mount the
 # NFS backup share at BACKUP_NFS_PATH on every node first.
+# Before the first start of patroni, turn etcd authentication on (once, on
+# PG_1, with etcd running on all three):
+#   docker compose -f postgres.yml --env-file .env up -d etcd     # on each PG VM
+#   docker compose -f postgres.yml --env-file .env exec etcd sh -c \
+#     'etcdctl user add root --new-user-password="$ETCD_ROOT_PASSWORD" &&
+#      etcdctl user grant-role root root && etcdctl auth enable'
+# Firewall 2379/2380 (etcd) and 8008 (Patroni) to the PG and LB VMs only.
 # After the first start, on the leader (patronictl list):
 #   docker compose -f postgres.yml --env-file .env exec patroni /etc/amaze/backup.sh init
 name: amaze-pg
@@ -21,6 +28,9 @@ services:
       - --initial-cluster=pg-1=http://${PG_1}:2380,pg-2=http://${PG_2}:2380,pg-3=http://${PG_3}:2380
       - --initial-cluster-state=new
       - --initial-cluster-token=amaze-pg
+    environment:
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD}
+      ETCDCTL_API: "3"
     volumes: [etcd:/etcd-data]
   patroni:
     build: ./postgres
@@ -37,6 +47,8 @@ services:
       PG_2: ${PG_2}
       PG_3: ${PG_3}
       POSTGRES_PASSWORD: ${PG_SUPERUSER_PASSWORD}
+      PATRONI_REST_PASSWORD: ${PATRONI_REST_PASSWORD}
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD}
       REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD}
       APP_DB_PASSWORD: ${POSTGRES_PASSWORD}
       PG_MAX_CONNECTIONS: ${PG_MAX_CONNECTIONS}

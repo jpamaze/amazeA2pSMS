@@ -156,11 +156,17 @@ func (c *Checker) check(a *Account, sender, text string, partial bool, f domain.
 		if t.status != "active" {
 			return f, fail(ReasonTemplate, "template %s is suspended", f.TemplateID)
 		}
-		if !partial {
-			m, err := t.matcher()
-			if err != nil {
-				return f, fail(ReasonTemplate, "template %s cannot be matched: %v", f.TemplateID, err)
+		m, err := t.matcher()
+		if err != nil {
+			return f, fail(ReasonTemplate, "template %s cannot be matched: %v", f.TemplateID, err)
+		}
+		if partial {
+			// One part of a message the sender split itself: it must be a
+			// piece of the template (the whole is never seen here).
+			if !m.MatchFragment(text) {
+				return f, fail(ReasonTemplate, "text of this part does not fit template %s", f.TemplateID)
 			}
+		} else {
 			var ok bool
 			if vals, ok = m.Match(text); !ok {
 				return f, fail(ReasonTemplate, "text does not match template %s", f.TemplateID)

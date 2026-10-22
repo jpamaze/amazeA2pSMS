@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf16"
 
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/metrics"
 
@@ -37,6 +38,7 @@ var (
 	ErrInvalidSender      = numbering.ErrInvalidSender
 	ErrEmptyMessage       = errors.New("ingest: empty message")
 	ErrTooLong            = errors.New("ingest: message longer than the segment limit")
+	ErrBadUDH             = errors.New("ingest: user data header must be one concatenation element")
 	ErrNoPrice            = pricing.ErrNoPrice
 	ErrInsufficient       = wallet.ErrInsufficient
 	ErrUnavailable        = errors.New("ingest: temporarily unavailable")
@@ -153,6 +155,8 @@ func (p *Pipeline) accept(ctx context.Context, req Request) (Result, error) {
 	segments := 1
 	if len(req.UDH) == 0 {
 		segments = gsm7.PlanFor(req.Text).Segments
+	} else if err := checkPart(req.UDH, req.Text); err != nil {
+		return Result{}, err
 	}
 	if segments > MaxSegments {
 		return Result{}, ErrTooLong
@@ -346,4 +350,43 @@ func (p *Pipeline) duplicate(ctx context.Context, msgID string) (Result, error) 
 	}
 	price, _ := decimal.NewFromString(st.Price)
 	return Result{MessageID: msgID, Segments: st.Segments, Price: price, Duplicate: true}, nil
+}
+
+// checkPart validates one part of a message the sender split itself: the
+// UDH may hold only one concatenation element with sane numbers, and the
+// part must fit one SMS, because it is sent to the vendor as it is and
+// billed as one segment.
+func checkPart(udh []byte, text string) error {
+	if len(udh) < 1 || int(udh[0]) != len(udh)-1 {
+		return ErrBadUDH
+	}
+	var total, seq int
+	concat := 0
+	for i := 1; i < len(udh); {
+		if i+1 >= len(udh) || i+2+int(udh[i+1]) > len(udh) {
+			return ErrBadUDH
+		}
+		iei, l, data := udh[i], int(udh[i+1]), udh[i+2:i+2+int(udh[i+1])]
+		switch {
+		case iei == 0x00 && l == 3:
+			total, seq = int(data[1]), int(data[2])
+		case iei == 0x08 && l == 4:
+			total, seq = int(data[2]), int(data[3])
+		default:
+			return ErrBadUDH // only concatenation; no ports, WAP push or others
+		}
+		concat++
+		i += 2 + l
+	}
+	if concat != 1 || total < 1 || total > MaxSegments || seq < 1 || seq > total {
+		return ErrBadUDH
+	}
+	if n, ok := gsm7.Septets(text); ok {
+		if (len(udh)*8+6)/7+n > 160 {
+			return ErrTooLong
+		}
+	} else if len(udh)+2*len(utf16.Encode([]rune(text))) > 140 {
+		return ErrTooLong
+	}
+	return nil
 }

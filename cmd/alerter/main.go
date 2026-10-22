@@ -14,11 +14,13 @@ import (
 	"github.com/jpamaze/amazeA2pSMS/internal/billing/wallet"
 	"github.com/jpamaze/amazeA2pSMS/internal/platform/secrets"
 	"github.com/jpamaze/amazeA2pSMS/internal/service"
+	"github.com/jpamaze/amazeA2pSMS/internal/webhook"
 )
 
 type alerterConfig struct {
-	Every      time.Duration `env:"ALERT_EVERY" envDefault:"30s"`
-	SecretsKey string        `env:"SECRETS_KEY"`
+	Every        time.Duration `env:"ALERT_EVERY" envDefault:"30s"`
+	AllowPrivate bool          `env:"WEBHOOK_ALLOW_PRIVATE"` // dev only: alert webhooks to local test servers
+	SecretsKey   string        `env:"SECRETS_KEY"`
 
 	SMTPHost     string `env:"SMTP_HOST"`
 	SMTPPort     int    `env:"SMTP_PORT" envDefault:"587"`
@@ -45,7 +47,12 @@ func main() {
 		if err != nil {
 			return err
 		}
-		a := &alerts.Alerter{PG: d.PG, Wallets: wallet.New(d.Redis), Secrets: box, Log: d.Log,
+		if c.AllowPrivate && d.Cfg.Env != "dev" {
+			return fmt.Errorf("WEBHOOK_ALLOW_PRIVATE is only allowed with APP_ENV=dev")
+		}
+		// Alert webhooks are customer-chosen URLs: the same guarded client
+		// as receipt webhooks (public addresses only, no redirects).
+		a := &alerts.Alerter{PG: d.PG, Wallets: wallet.New(d.Redis), Secrets: box, Log: d.Log, HTTP: webhook.NewHTTPClient(c.AllowPrivate),
 			Mail: &alerts.SMTP{Host: c.SMTPHost, Port: c.SMTPPort, User: c.SMTPUser, Password: c.SMTPPassword, From: c.SMTPFrom, TLS: c.SMTPTLS},
 			SMS:  &alerts.SMS{URL: c.SMSURL, APIKey: c.SMSAPIKey, Sender: c.SMSSender, Template: c.SMSTemplate}}
 		if c.SMTPHost == "" {

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { get } from "@/lib/api";
-import { setDevSession, signIn } from "@/lib/auth";
+import { safePath, setDevSession, signIn } from "@/lib/auth";
 import { useSession } from "@/lib/session";
 import { Button, Card, Loading, Notice } from "@/components/ui";
 
@@ -12,7 +12,7 @@ export default function Login() {
   const { config, me, loading, error, reload } = useSession();
   const [users, setUsers] = useState<DevUser[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const next = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("next") ?? "/" : "/";
+  const next = typeof window !== "undefined" ? safePath(new URLSearchParams(window.location.search).get("next")) : "/";
 
   useEffect(() => {
     if (me) window.location.replace(next);

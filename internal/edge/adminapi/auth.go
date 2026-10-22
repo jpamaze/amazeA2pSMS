@@ -82,10 +82,15 @@ func NewOIDC(ctx context.Context, pg *pgxpool.Pool, issuer, audience string, dis
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery for %s: %w", issuer, err)
 	}
+	aud := splitList(audience)
+	if len(aud) == 0 {
+		// Without it, a token the issuer gave any other client would do.
+		return nil, errors.New("OIDC_AUDIENCE must name the client IDs whose tokens are accepted")
+	}
 	return &OIDC{
 		PG:       pg,
 		Verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
-		Audience: splitList(audience),
+		Audience: aud,
 	}, nil
 }
 
@@ -136,7 +141,7 @@ func (o *OIDC) Resolve(r *http.Request) (actor, error) {
 	}) {
 		return actor{}, errUnauthenticated
 	}
-	if c.Email == "" || (c.EmailVerified != nil && !*c.EmailVerified) {
+	if c.Email == "" || c.EmailVerified == nil || !*c.EmailVerified {
 		return actor{}, errNoUser
 	}
 

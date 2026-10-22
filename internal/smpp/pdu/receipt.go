@@ -99,7 +99,16 @@ func ParseReceipt(sm *SM) (Receipt, error) {
 func parseReceiptText(s string) map[string]string {
 	keys := []string{"id", "sub", "dlvrd", "submit date", "done date", "stat", "err", "text"}
 	out := map[string]string{}
-	lower := strings.ToLower(s)
+	// ASCII-only lowering keeps every byte where it was, so offsets found
+	// in lower are valid in s (strings.ToLower rewrites invalid UTF-8 into
+	// longer sequences and the offsets would point elsewhere).
+	lb := []byte(s)
+	for i, c := range lb {
+		if c >= 'A' && c <= 'Z' {
+			lb[i] = c + 'a' - 'A'
+		}
+	}
+	lower := string(lb)
 	type pos struct {
 		key        string
 		start, val int

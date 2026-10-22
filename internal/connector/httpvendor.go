@@ -367,8 +367,14 @@ func snippet(b []byte) string {
 // other answer makes the vendor retry.
 func DLRHandler(p HTTPProfile, journal func(context.Context, domain.DLR) error, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(p.DLRToken)) != 1 {
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // forms too
+		// The token may come in a header, which keeps it out of access logs.
+		token := r.Header.Get("X-DLR-Token")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		// A blank configured token would accept anyone.
+		if p.DLRToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(p.DLRToken)) != 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

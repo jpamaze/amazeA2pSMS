@@ -273,7 +273,10 @@ func (s *Session) readLoop() {
 		s.lastRecv.Store(time.Now().UnixNano())
 		if err != nil { // body malformed, framing intact
 			if !pdu.IsResponse(p.CommandID) {
-				go s.write(&pdu.PDU{CommandID: pdu.GenericNack, Status: pdu.StatusInvMsgLen, Seq: p.Seq})
+				nack := &pdu.PDU{CommandID: pdu.GenericNack, Status: pdu.StatusInvMsgLen, Seq: p.Seq}
+				if !s.async(func() { _ = s.write(nack) }) {
+					return
+				}
 			}
 			continue
 		}
@@ -291,29 +294,50 @@ func (s *Session) readLoop() {
 		}
 		// The read loop never writes: if both peers blocked writing from their
 		// read loops with full buffers, neither would read again (deadlock).
+		// Every reply and handler runs under the same in-flight limit, so a
+		// peer that sends without reading the replies stalls this loop (and
+		// is closed by the idle check) instead of piling up goroutines.
+		var ok bool
 		switch {
 		case p.CommandID == pdu.EnquireLink:
-			go s.Respond(p, pdu.StatusOK, nil)
+			ok = s.async(func() { _ = s.Respond(p, pdu.StatusOK, nil) })
 		case p.CommandID == pdu.Unbind:
-			go func() {
+			s.async(func() {
 				_ = s.Respond(p, pdu.StatusOK, nil)
 				s.closeWith(nil)
-			}()
+			})
 			return
 		case !pdu.Known(p.CommandID) || s.cfg.Handler == nil:
-			go s.write(&pdu.PDU{CommandID: pdu.GenericNack, Status: pdu.StatusInvCmdID, Seq: p.Seq})
+			nack := &pdu.PDU{CommandID: pdu.GenericNack, Status: pdu.StatusInvCmdID, Seq: p.Seq}
+			ok = s.async(func() { _ = s.write(nack) })
 		default:
-			select {
-			case s.inflight <- struct{}{}:
-			case <-s.closed:
-				return
-			}
-			go func(p *pdu.PDU) {
-				defer func() { <-s.inflight }()
-				s.cfg.Handler(s, p)
-			}(p)
+			ok = s.async(func() { s.cfg.Handler(s, p) })
+		}
+		if !ok {
+			return
 		}
 	}
+}
+
+// async runs fn in its own goroutine once an in-flight slot is free. It
+// reports false when the session closed while waiting. A panic in fn (a
+// handler bug, or input nothing anticipated) closes this session only.
+func (s *Session) async(fn func()) bool {
+	select {
+	case s.inflight <- struct{}{}:
+	case <-s.closed:
+		return false
+	}
+	go func() {
+		defer func() { <-s.inflight }()
+		defer func() {
+			if r := recover(); r != nil {
+				s.closeWith(fmt.Errorf("session: handler panic: %v", r))
+			}
+		}()
+		fn()
+	}()
+	return true
 }
 
 func (s *Session) keepalive() {

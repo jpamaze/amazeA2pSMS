@@ -6,11 +6,17 @@ import { Brand } from "@/lib/auth";
 import { applyBrand, can, useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
 import { Gate, Shell } from "@/components/Shell";
-import { Button, Card, Field, Input, Loading, Notice, useAction } from "@/components/ui";
+import type { AccountRow } from "@/components/AccountPicker";
+import { Button, Card, Field, Input, Loading, Notice, Select, useAction } from "@/components/ui";
 
 function Branding() {
   const { me, reload: reloadSession } = useSession();
-  const acct = me?.account_id;
+  const platform = me?.account_role === "platform";
+  const [acct, setAcct] = useState("");
+  useEffect(() => { if (me && !acct) setAcct(new URLSearchParams(window.location.search).get("account") ?? me.account_id); }, [me, acct]);
+  const own = acct === me?.account_id;
+  // The platform also edits resellers' brands: it alone sets portal domains.
+  const resellers = useData(() => (platform ? get<AccountRow[]>("/v1/accounts?role=reseller&limit=500") : Promise.resolve([])), [platform]);
   const { data, error } = useData(() => (acct ? get<{ own: Brand | null; effective: Brand }>(`/v1/accounts/${acct}/branding`) : Promise.resolve(null)), [acct]);
   const [f, setF] = useState({ name: "", logo: "", primary_color: "#1f6feb", support_email: "", domain: "" });
   useEffect(() => {
@@ -32,22 +38,35 @@ function Branding() {
       {!data && !error && <Loading />}
       <Notice>{error}</Notice>
       <div className="grid cols-2">
-        <Card title="Your brand">
-          <p className="muted">{me?.account_role === "reseller"
-            ? "Your customers see this name, logo and colour, on your own domain if you set one. They never see the platform's brand."
-            : "The platform brand: shown on the main domain and to accounts without a reseller brand."}</p>
+        <Card title={own ? "Your brand" : "Reseller's brand"}>
+          {platform && (
+            <div className="form-row" style={{ marginBottom: 12 }}>
+              <Field label="Brand of">
+                <Select value={acct} onChange={(e) => setAcct(e.target.value)}>
+                  <option value={me!.account_id}>{me!.account_name} (platform)</option>
+                  {(resellers.data ?? []).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </Select>
+              </Field>
+            </div>
+          )}
+          <p className="muted">{!platform
+            ? "Your customers see this name, logo and colour, on your own domain if you have one. They never see the platform's brand."
+            : own ? "The platform brand: shown on the main domain and to accounts without a reseller brand."
+            : "This reseller's customers see its brand. Set its portal domain once its CNAME, TLS certificate and sign-in redirect are in place."}</p>
           <form className="form" onSubmit={(e) => { e.preventDefault(); a.run(async () => {
             await send("PUT", `/v1/accounts/${acct}/branding`, f);
-            reloadSession();
+            if (own) reloadSession();
           }, "Saved"); }}>
             <Field label="Display name"><Input value={f.name} maxLength={60} onChange={(e) => setF({ ...f, name: e.target.value })} required /></Field>
             <Field label="Logo" hint="PNG/SVG under 200 KB, or an https:// URL">
               <Input type="file" accept="image/png,image/svg+xml,image/jpeg,image/webp" onChange={(e) => onLogo(e.target.files?.[0])} />
             </Field>
-            <Field label="Colour"><Input type="color" value={f.primary_color} onChange={(e) => { setF({ ...f, primary_color: e.target.value }); applyBrand({ ...f, primary_color: e.target.value }); }} /></Field>
+            <Field label="Colour"><Input type="color" value={f.primary_color} onChange={(e) => { setF({ ...f, primary_color: e.target.value }); if (own) applyBrand({ ...f, primary_color: e.target.value }); }} /></Field>
             <Field label="Support e-mail"><Input type="email" value={f.support_email} onChange={(e) => setF({ ...f, support_email: e.target.value })} /></Field>
-            <Field label="Portal domain" hint="e.g. sms.yourcompany.com — point a CNAME at the platform's portal host; HTTPS is set up by the platform team">
-              <Input value={f.domain} onChange={(e) => setF({ ...f, domain: e.target.value.trim().toLowerCase() })} placeholder="optional" />
+            <Field label="Portal domain" hint={platform
+              ? "e.g. sms.reseller.com: add its TLS certificate and sign-in redirect first (docs/phase4-portals.md)"
+              : "Set by the platform: point a CNAME for your domain at the portal host and ask the platform team to add it"}>
+              <Input value={f.domain} onChange={(e) => setF({ ...f, domain: e.target.value.trim().toLowerCase() })} placeholder={platform ? "optional" : "none"} disabled={!platform} />
             </Field>
             {can(me, "admin") && <Button type="submit" busy={a.busy}>Save</Button>}
           </form>

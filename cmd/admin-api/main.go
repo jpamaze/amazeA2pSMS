@@ -99,11 +99,15 @@ func main() {
 			handler = adminapi.PortalHandler(ac.PortalDir, handler)
 			d.Log.Info("serving the portal", "dir", ac.PortalDir)
 		}
+		handler = adminapi.SecureHeaders(handler, api.Portal.OIDCIssuer)
 		d.Log.Info("admin api listening", "addr", ac.Addr)
 		return service.ServeHTTP(ctx, &http.Server{
 			Addr:              ac.Addr,
 			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Minute, // CSV imports can be large, but not endless
+			WriteTimeout:      10 * time.Minute,
+			IdleTimeout:       2 * time.Minute,
 		})
 	})
 }

@@ -87,8 +87,10 @@ func (s *Service) moveLocked(ctx context.Context, conn *pgxpool.Conn, t Transfer
 			(account_id, kind, amount, balance_after, reference, idempotency_key, created_by, counterparty) VALUES
 			($1, $11, $3, $4, $5, $6, $7, $2),
 			($2, $12, $8, $9, $5, $10, $7, $1)`,
-			t.From, t.To, t.Amount.Neg(), outBal, t.Reference, keyPrefix+t.IdempotencyKey+":out", t.Actor,
-			t.Amount, toBal, keyPrefix+t.IdempotencyKey+":in", outKind, inKind)
+			// Keys are scoped to the paying account: another account reusing
+			// the same key must not collide with this transfer.
+			t.From, t.To, t.Amount.Neg(), outBal, t.Reference, keyPrefix+t.From+":"+t.IdempotencyKey+":out", t.Actor,
+			t.Amount, toBal, keyPrefix+t.From+":"+t.IdempotencyKey+":in", outKind, inKind)
 		return err
 	})
 	var pgErr *pgconn.PgError

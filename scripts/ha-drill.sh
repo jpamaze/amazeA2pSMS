@@ -39,7 +39,7 @@ pg_writable() { PGCONNECT_TIMEOUT=2 psql "$1" -Atc "SELECT NOT pg_is_in_recovery
 since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
 pg_leader() { curl -s http://127.0.0.1:8008/cluster | python3 -c 'import json,sys; print(next((m["name"] for m in json.load(sys.stdin)["members"] if m["role"]=="leader"), ""))' 2>/dev/null ||
   for n in 2 3; do curl -s "http://127.0.0.1:$((8007 + n))/cluster" | python3 -c 'import json,sys; print(next((m["name"] for m in json.load(sys.stdin)["members"] if m["role"]=="leader"), ""))' 2>/dev/null && break; done; }
-redis_primary() { for p in 26380 26381 26382; do redis-cli -p $p SENTINEL get-master-addr-by-name amaze 2>/dev/null | paste -sd: && return; done; }
+redis_primary() { for p in 26380 26381 26382; do redis-cli -p $p -a "$REDIS_SENTINEL_PASSWORD" --no-auth-warning SENTINEL get-master-addr-by-name amaze 2>/dev/null | paste -sd: && return; done; }
 ch_count() { curl -s -u "sms:$PGPASSWORD" "http://127.0.0.1:$1/" --data-binary "SELECT count() FROM sms.message_records" 2>/dev/null || echo down; }
 
 load_start() {

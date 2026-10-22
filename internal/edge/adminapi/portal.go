@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -171,8 +172,8 @@ func (a *API) putBranding(w http.ResponseWriter, r *http.Request, act actor) {
 	}
 	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
 	switch {
-	case strings.TrimSpace(req.Name) == "" || len(req.Name) > 60:
-		writeErr(w, http.StatusBadRequest, "name is required (up to 60 characters)")
+	case strings.TrimSpace(req.Name) == "" || len(req.Name) > 60 || hasControl(req.Name):
+		writeErr(w, http.StatusBadRequest, "name is required (up to 60 characters, no line breaks)")
 		return
 	case req.PrimaryColor != "" && !colorRe.MatchString(req.PrimaryColor):
 		writeErr(w, http.StatusBadRequest, "primary_color must look like #1f6feb")
@@ -186,6 +187,21 @@ func (a *API) putBranding(w http.ResponseWriter, r *http.Request, act actor) {
 	}
 	if req.PrimaryColor == "" {
 		req.PrimaryColor = DefaultBrand.PrimaryColor
+	}
+	// Portal domains are the platform's to set: it also adds the TLS
+	// certificate and the sign-in redirect, and nobody else may claim a host
+	// name (the platform's own portal included). A reseller saving its brand
+	// keeps whatever domain it has.
+	if act.Role != "platform" {
+		var current string
+		if err := a.PG.QueryRow(r.Context(), `SELECT coalesce(domain, '') FROM branding WHERE account_id = $1`, id).Scan(&current); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeDBErr(w, err)
+			return
+		}
+		if req.Domain != current {
+			writeErr(w, http.StatusForbidden, "the portal domain is set by the platform; ask it to add yours")
+			return
+		}
 	}
 	var domain *string
 	if req.Domain != "" {
@@ -236,4 +252,34 @@ func PortalHandler(dir string, api http.Handler) http.Handler {
 func exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// SecureHeaders sets the security headers of every response: API answers
+// are never cached (statements, keys shown once, secrets); portal pages get
+// a Content-Security-Policy that keeps scripts, styles and API calls on this
+// origin and the sign-in server (oidcIssuer, may be empty); HTTPS responses
+// get HSTS.
+func SecureHeaders(h http.Handler, oidcIssuer string) http.Handler {
+	sso := ""
+	if u, err := url.Parse(oidcIssuer); err == nil && u.Scheme != "" && u.Host != "" {
+		sso = " " + u.Scheme + "://" + u.Host
+	}
+	// Next.js bootstraps pages with inline scripts, hence 'unsafe-inline';
+	// connect-src still stops a script from sending data anywhere else.
+	csp := "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
+		"connect-src 'self'" + sso + "; frame-src 'self'" + sso + "; form-action 'self'" + sso + "; " +
+		"frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		hd.Set("X-Content-Type-Options", "nosniff")
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			hd.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			hd.Set("Cache-Control", "no-store")
+		} else {
+			hd.Set("Content-Security-Policy", csp)
+		}
+		h.ServeHTTP(w, r)
+	})
 }

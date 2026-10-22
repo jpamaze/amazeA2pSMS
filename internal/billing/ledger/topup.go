@@ -64,7 +64,7 @@ func (s *Service) creditLocked(ctx context.Context, conn *pgxpool.Conn, kind str
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_entries
 			(account_id, kind, amount, balance_after, reference, idempotency_key, created_by)
 			VALUES ($1, $7, $2, $3, $4, $5, $6)`,
-			t.AccountID, t.Amount, bal, t.Reference, kind+":"+t.IdempotencyKey, t.Actor, kind)
+			t.AccountID, t.Amount, bal, t.Reference, kind+":"+t.AccountID+":"+t.IdempotencyKey, t.Actor, kind)
 		return err
 	})
 	var pgErr *pgconn.PgError

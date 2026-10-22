@@ -32,15 +32,27 @@ export function initOIDC(cfg: PortalConfig) {
   });
 }
 
+// safePath keeps a post-sign-in destination on this site: a path such as
+// /messages/, never javascript:, //other.host or https://other.host.
+export function safePath(to: string | null | undefined): string {
+  if (!to || !to.startsWith("/") || to.startsWith("//") || to.startsWith("/\\")) return "/";
+  try {
+    const u = new URL(to, window.location.origin);
+    return u.origin === window.location.origin ? u.pathname + u.search + u.hash : "/";
+  } catch {
+    return "/";
+  }
+}
+
 export async function signIn(returnTo = "/") {
   if (!manager) throw new Error("sign-in is not configured");
-  await manager.signinRedirect({ state: { returnTo } });
+  await manager.signinRedirect({ state: { returnTo: safePath(returnTo) } });
 }
 
 export async function completeSignIn(): Promise<string> {
   if (!manager) throw new Error("sign-in is not configured");
   const user = await manager.signinRedirectCallback();
-  return (user.state as { returnTo?: string } | undefined)?.returnTo ?? "/";
+  return safePath((user.state as { returnTo?: string } | undefined)?.returnTo);
 }
 
 export async function accessToken(): Promise<string | null> {

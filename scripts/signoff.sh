@@ -5,6 +5,8 @@
 #   scripts/signoff.sh render-monitoring   # on MON_1: write Prometheus config from deploy/vm/.env
 #   scripts/signoff.sh run                 # on SIM_1: smoke, 30 min at 5,000 TPS, 5 min at 10,000 TPS
 #   scripts/signoff.sh billing <since>     # on an APP VM: ledger / Redis / ClickHouse cross-check
+#   scripts/signoff.sh soak                # on SIM_1: 10,000 TPS for 24 h (docs/soak-test.md)
+#   scripts/signoff.sh soak-report <since> # leak / restart / backlog checks from Prometheus
 #
 # Thresholds (override with env): MAX_P99 (steady), BURST_MAX_P99, MAX_LAG (receipt lag).
 set -euo pipefail
@@ -23,6 +25,10 @@ MAX_P99=${MAX_P99:-100ms}
 BURST_MAX_P99=${BURST_MAX_P99:-250ms}
 MAX_LAG=${MAX_LAG:-60s}
 BINDS=${BINDS:-16}
+SOAK_TPS=${SOAK_TPS:-10000}
+SOAK_DURATION=${SOAK_DURATION:-24h}
+SOAK_MAX_P99=${SOAK_MAX_P99:-250ms}
+SOAK_MAX_OUTSTANDING=${SOAK_MAX_OUTSTANDING:-200000}
 
 loadgen() {
   docker compose -f "$VM/sim.yml" --env-file "$ENV_FILE" --profile load run --rm loadgen \
@@ -65,13 +71,31 @@ run)
   echo "All load stages passed. Next, on an APP VM:"
   echo "  scripts/signoff.sh billing $SINCE"
   ;;
+soak)
+  # Run it detached (nohup or tmux): it takes SOAK_DURATION plus the drain.
+  mkdir -p "$VM/reports"
+  SINCE=$(date -u +%FT%TZ)
+  echo "soak started $SINCE"
+  echo "$SINCE" > "$VM/reports/soak-since.txt"
+  stage soak -tps "$SOAK_TPS" -duration "$SOAK_DURATION" -drain 15m -interval 1h -reconnect \
+    -max-failed 0 -min-tps-ratio 0.99 -max-p99 "$SOAK_MAX_P99" -max-receipt-lag 5m -max-outstanding "$SOAK_MAX_OUTSTANDING"
+  echo
+  echo "Load passed. Next, on an APP VM:"
+  echo "  scripts/signoff.sh soak-report $SINCE"
+  echo "  scripts/signoff.sh billing $SINCE"
+  ;;
+soak-report)
+  SINCE=${2:?usage: signoff.sh soak-report <since RFC3339>}
+  docker compose -f "$VM/app.yml" --env-file "$ENV_FILE" --profile ops run --rm \
+    -v "$VM/reports:/reports" soak-report -prometheus "http://$MON_1:9090" -start "$SINCE" -report /reports/soak-report.json
+  ;;
 billing)
   SINCE=${2:?usage: signoff.sh billing <since RFC3339>}
   docker compose -f "$VM/app.yml" --env-file "$ENV_FILE" --profile init run --rm \
     billing-check -since "$SINCE" -settle 5m
   ;;
 *)
-  sed -n '2,12p' "$0"
+  sed -n '2,14p' "$0"
   exit 2
   ;;
 esac

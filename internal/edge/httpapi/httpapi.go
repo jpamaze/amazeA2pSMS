@@ -134,10 +134,12 @@ func (a *API) send(w http.ResponseWriter, r *http.Request, acct string) {
 	})
 	if err != nil {
 		code, kind := statusFor(err)
+		msg := err.Error()
 		if code == http.StatusServiceUnavailable {
 			a.Log.Warn("send unavailable", "account", acct, "err", err)
+			msg = "temporarily unavailable; retry shortly" // the cause names internal hosts
 		}
-		writeErr(w, code, kind, err.Error())
+		writeErr(w, code, kind, msg)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, sendResponse{
