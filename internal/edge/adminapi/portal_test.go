@@ -150,6 +150,10 @@ func TestPortalEndpoints(t *testing.T) {
 	expect("platform suspends a reseller's sub-account", 200, code, body)
 	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"active"}`)
 	expect("the reseller cannot lift a platform suspension", 403, code, body)
+	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"suspended"}`)
+	expect("the reseller suspends it again", 200, code, body)
+	code, body = call(res, "r@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"active"}`)
+	expect("which does not take over the platform's suspension", 403, code, body)
 	code, body = call(plat, "ops@x", "PUT", "/v1/accounts/"+shop+"/status", `{"status":"active"}`)
 	expect("the platform can", 200, code, body)
 

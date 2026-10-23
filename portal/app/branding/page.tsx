@@ -27,7 +27,8 @@ function Branding() {
 
   function onLogo(file: File | undefined) {
     if (!file) return;
-    if (file.size > 200_000) return a.setError("Logo must be under 200 KB");
+    // Sent inline in the request, which the server caps at 64 KB.
+    if (file.size > 45_000) return a.setError("Logo must be under 45 KB");
     const r = new FileReader();
     r.onload = () => setF((x) => ({ ...x, logo: String(r.result) }));
     r.readAsDataURL(file);
@@ -58,7 +59,7 @@ function Branding() {
             if (own) reloadSession();
           }, "Saved"); }}>
             <Field label="Display name"><Input value={f.name} maxLength={60} onChange={(e) => setF({ ...f, name: e.target.value })} required /></Field>
-            <Field label="Logo" hint="PNG/SVG under 200 KB, or an https:// URL">
+            <Field label="Logo" hint="PNG, SVG, JPEG or WebP under 45 KB">
               <Input type="file" accept="image/png,image/svg+xml,image/jpeg,image/webp" onChange={(e) => onLogo(e.target.files?.[0])} />
             </Field>
             <Field label="Colour"><Input type="color" value={f.primary_color} onChange={(e) => { setF({ ...f, primary_color: e.target.value }); if (own) applyBrand({ ...f, primary_color: e.target.value }); }} /></Field>

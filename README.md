@@ -4,6 +4,8 @@ A carrier-grade A2P SMS platform: customer SMPP (3.3/3.4/5.0) and HTTP in, vendo
 
 Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: customer SMPP or HTTP → Kafka → router → vendor SMPP or HTTP connector → delivery receipt back to the customer (deliver_sm or signed webhook), with wallet holds, ledger charges and history in ClickHouse. Customers can be onboarded through the admin API. Tested at 4,859 accepted TPS on a single 4-core box with zero loss. See [docs/phase1-core-messaging.md](docs/phase1-core-messaging.md) for what is built, the test results and what comes next.
 
+Documentation: [admin user guide](docs/admin-guide.md), [setup and installation guide](docs/setup-guide.md), [API reference](docs/api-reference.md).
+
 ## Layout
 
 | Path | What |
@@ -25,7 +27,7 @@ Status: **Phase 1, Core messaging (slices 1 and 2).** Messages go end to end: cu
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
 | `internal/billing/credit` | Credit limit changes (platform: any account; reseller: own sub-accounts within its balance) |
 | `internal/billing/hierarchy`, `internal/billing/ledger` | Reseller chain for two-level charging; top-ups, reseller-to-sub-account transfers, dispute credits ([docs/phase2-billing.md](docs/phase2-billing.md)) |
-| `portal/` | Next.js + TypeScript portals (admin, reseller, customer), served by admin-api ([docs/phase4-portals.md](docs/phase4-portals.md)) |
+| `portal/` | Next.js + TypeScript portals (admin, reseller, customer), served by admin-api ([docs/phase4-portals.md](docs/phase4-portals.md); user guide [docs/admin-guide.md](docs/admin-guide.md)) |
 | `cmd/alerter`, `internal/alerts` | Low-balance alerts by e-mail (SMTP), SMS and webhook |
 | `internal/vendorhealth`, `internal/network`, `internal/firewall` | Vendor failover, MNP / number series / HLR, firewall rules and SMS-pumping limits ([docs/phase3-network.md](docs/phase3-network.md)) |
 | `internal/dlt` | India DLT: template matching, entity/header/category checks, whitelists, TM chain, CSV import, vendor error codes ([docs/phase3-dlt.md](docs/phase3-dlt.md)) |

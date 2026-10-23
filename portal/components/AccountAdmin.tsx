@@ -64,8 +64,8 @@ export function SmppCredentials({ acct, manage }: { acct: string; manage: boolea
           });
           setF({ ...f, system_id: "", password: "" }); reload();
         }, "Credential created"); }}>
-          <Field label="system_id"><Input value={f.system_id} maxLength={16} onChange={(e) => setF({ ...f, system_id: e.target.value })} required /></Field>
-          <Field label="Password" hint="SMPP allows 8 characters"><Input value={f.password} maxLength={8} onChange={(e) => setF({ ...f, password: e.target.value })} required /></Field>
+          <Field label="system_id"><Input value={f.system_id} maxLength={15} onChange={(e) => setF({ ...f, system_id: e.target.value })} required /></Field>
+          <Field label="Password" hint="6 to 8 characters"><Input value={f.password} minLength={6} maxLength={8} onChange={(e) => setF({ ...f, password: e.target.value })} required /></Field>
           <Field label="TPS per bind"><Input type="number" min={1} value={f.tps} onChange={(e) => setF({ ...f, tps: e.target.value })} /></Field>
           <Field label="Max binds"><Input type="number" min={1} value={f.max_binds} onChange={(e) => setF({ ...f, max_binds: e.target.value })} /></Field>
           <Field label="Allowed IPs" hint="CIDRs, comma-separated; empty = any"><Input value={f.allowed_ips} onChange={(e) => setF({ ...f, allowed_ips: e.target.value })} /></Field>

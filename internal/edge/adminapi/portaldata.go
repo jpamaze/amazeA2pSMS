@@ -185,8 +185,13 @@ func (a *API) setAccountStatus(w http.ResponseWriter, r *http.Request, act actor
 		return
 	}
 	// A suspension is lifted only by whoever imposed it, or the platform.
+	// Suspending an account that is already suspended keeps the original
+	// suspender (so a reseller cannot take over a platform suspension); the
+	// platform always takes it over.
 	tag, err := a.PG.Exec(r.Context(), `UPDATE accounts
-		SET status = $2, suspended_by = CASE WHEN $2 = 'suspended' THEN $3::uuid END
+		SET status = $2, suspended_by = CASE WHEN $2 = 'suspended' THEN
+		      CASE WHEN $4 OR status <> 'suspended' OR suspended_by IS NULL THEN $3::uuid ELSE suspended_by END
+		    END
 		WHERE id = $1 AND status <> 'closed'
 		  AND ($2 = 'suspended' OR suspended_by IS NULL OR suspended_by = $3::uuid OR $4)`,
 		id, req.Status, act.AccountID, act.Role == "platform")

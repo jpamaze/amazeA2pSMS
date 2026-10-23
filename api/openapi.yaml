@@ -28,7 +28,7 @@ paths:
           name: Idempotency-Key
           required: false
           schema: { type: string, maxLength: 64 }
-          description: Same key within 72 h returns the original result instead of sending again.
+          description: Same key within 96 h returns the original result instead of sending again.
       requestBody:
         required: true
         content:
@@ -102,7 +102,7 @@ components:
   schemas:
     SendRequest:
       type: object
-      required: [to, sender, text, pe_id]
+      required: [to, sender, text]
       properties:
         to: { type: string, description: 'E.164, e.g. +919812345678' }
         sender: { type: string, description: DLT-registered header }
