@@ -1,0 +1,183 @@
+# Prometheus alert rules for the platform and its data stores. Alertmanager
+# (monitoring.yml) e-mails them to ALERT_EMAIL_TO and, if set, posts them to
+# ALERT_WEBHOOK_URL. severity: critical = act now; warning = look today.
+groups:
+  - name: availability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} {{ $labels.instance }} ({{ $labels.service }}) is not answering"
+          description: "Prometheus cannot scrape it for 2 minutes: the service or VM is down, or a firewall blocks the ops port."
+      - alert: MessagesNotLeaving
+        expr: sum(rate(sms_accepted_total[5m])) > 1 and sum(rate(sms_vendor_submits_total[5m])) == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Messages are accepted but none reach a vendor"
+          description: "Check the router and connector logs, vendor binds (portal: Vendors, Live monitor) and Kafka."
+      - alert: SubmitsRefusedUnavailable
+        expr: sum(rate(sms_refused_total{reason="unavailable"}[5m])) > 0.5
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Customers' submits are refused because a dependency is unavailable"
+          description: "The edges cannot reach Redis, PostgreSQL or Kafka. Check the data tier alerts."
+      - alert: AcceptLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(sms_accept_seconds_bucket[5m]))) > 0.25
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p99 time to accept a message is {{ $value | humanizeDuration }}"
+          description: "Over 250 ms for 10 minutes. Look at CPU on the app VMs, Redis and Kafka latency."
+      - alert: ConsumerRetrying
+        expr: sum by (group) (increase(sms_consumer_batch_retries_total[10m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.group }} keeps retrying batches"
+          description: "A dependency (PostgreSQL, Redis, ClickHouse) is failing for this consumer. Retries last up to 2 minutes, then the service restarts."
+      - alert: HistoryRowsDropped
+        expr: increase(sms_records_dropped_total[30m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Message history rows were dropped (no valid IDs)"
+          description: "See the ch-writer log; run billing-check for the period."
+      - alert: WebhooksDead
+        expr: sum(increase(sms_webhook_attempts_total{result="dead"}[30m])) > 50
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} customer receipt webhooks given up in 30 minutes"
+          description: "A customer's webhook URL is failing. Find it in the webhook-dispatcher log and tell the customer."
+
+  - name: vendors
+    rules:
+      - alert: VendorNoBinds
+        expr: sum by (vendor) (sms_vendor_binds_up) == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Vendor {{ $labels.vendor }} has no SMPP bind up"
+          description: "Its traffic fails over to other routes. Check the connector log and the vendor's status."
+      - alert: VendorOutOfRouting
+        expr: max by (vendor) (sms_vendor_routable) == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Vendor {{ $labels.vendor }} has been out of routing for 10 minutes (failover)"
+      - alert: VendorSubmitFailures
+        expr: |
+          sum by (vendor) (rate(sms_vendor_submits_total{result="failed"}[10m]))
+            / sum by (vendor) (rate(sms_vendor_submits_total[10m])) > 0.2
+          and sum by (vendor) (rate(sms_vendor_submits_total[10m])) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of submits to {{ $labels.vendor }} fail"
+      - alert: VendorDeliveryLow
+        expr: |
+          sum by (vendor) (rate(sms_vendor_dlrs_total{stat="DELIVRD"}[30m]))
+            / sum by (vendor) (rate(sms_vendor_dlrs_total[30m])) < 0.5
+          and sum by (vendor) (rate(sms_vendor_dlrs_total[30m])) > 1
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Only {{ $value | humanizePercentage }} of {{ $labels.vendor }}'s receipts are DELIVRD"
+
+  - name: data
+    rules:
+      - alert: PostgresNoPrimary
+        expr: sum(patroni_primary) != 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "PostgreSQL has {{ $value }} primaries (want 1)"
+          description: "Run patronictl list on a PG VM (docs/phase5-ha.md)."
+      - alert: PostgresDown
+        expr: patroni_postgres_running == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "PostgreSQL is not running on {{ $labels.instance }}"
+      - alert: RedisNoPrimary
+        expr: count(redis_instance_info{role="master"}) != 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Redis has {{ $value }} primaries (want 1)"
+      - alert: RedisReplicasMissing
+        expr: max(redis_connected_slaves * on (instance) group_left redis_instance_info{role="master"}) < 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The Redis primary has {{ $value }} replicas (want 2)"
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85 and redis_memory_max_bytes > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Redis on {{ $labels.instance }} uses {{ $value | humanizePercentage }} of maxmemory"
+          description: "Writes stop at 100% (noeviction). Raise REDIS_MAXMEMORY or add memory."
+      - alert: ClickHouseReadonlyReplica
+        expr: ClickHouseMetrics_ReadonlyReplica > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "ClickHouse on {{ $labels.instance }} has read-only replicas (Keeper quorum?)"
+          description: "History waits in Kafka meanwhile (72 h). See docs/phase5-ha.md."
+      - alert: KafkaUnavailablePartitions
+        expr: max(redpanda_cluster_unavailable_partitions) > 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value }} Kafka partitions have no leader"
+      - alert: KafkaUnderReplicated
+        expr: sum(redpanda_kafka_under_replicated_replicas) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} Kafka replicas are behind"
+
+  - name: balancers
+    rules:
+      - alert: BackendNoServers
+        expr: haproxy_backend_active_servers == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "HAProxy on {{ $labels.instance }}: no healthy server for {{ $labels.proxy }}"
+      - alert: BackendServerDown
+        expr: haproxy_server_status{state="DOWN"} == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "HAProxy on {{ $labels.instance }}: {{ $labels.proxy }}/{{ $labels.server }} is out (readiness failing)"
+
+  - name: machines
+    rules:
+      - alert: DiskFilling
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} {{ $labels.mountpoint }} has {{ $value | humanizePercentage }} free"
+      - alert: DiskAlmostFull
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} {{ $labels.mountpoint }} has {{ $value | humanizePercentage }} free"
+      - alert: MemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} has {{ $value | humanizePercentage }} memory available"
+      - alert: CPUBusy
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.9
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} CPU is {{ $value | humanizePercentage }} busy"

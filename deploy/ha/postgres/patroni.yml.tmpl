@@ -18,7 +18,7 @@ ctl:
 etcd3:
   hosts: [${PG_1}:2379, ${PG_2}:2379, ${PG_3}:2379]
   # etcd holds the leader lock and the cluster configuration (pg_hba
-  # included): auth on (backup.sh etcd-auth), Patroni signs in as root.
+  # included): auth on (see the top of postgres.yml), Patroni signs in as root.
   username: root
   password: "${ETCD_ROOT_PASSWORD}"
 bootstrap:

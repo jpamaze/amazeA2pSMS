@@ -20,10 +20,13 @@ Contents
 
 | Interface | Address (placeholder) | Notes |
 | --- | --- | --- |
-| HTTP REST | `https://api.example.com` | JSON over HTTPS. Paths start with `/v1`. |
+| HTTP REST | `https://<API_HOST>`, e.g. `https://api.example.com` | JSON over HTTPS (port 443). Paths start with `/v1`. Plain `http://` is redirected to HTTPS. |
 | SMPP, plain | `smpp.example.com:2775` | SMPP 3.3, 3.4 and 5.0 |
 | SMPP over TLS | `smpp.example.com:3550` | Same service; TLS is terminated at the load balancer. TLS 1.2 or later when the server terminates TLS itself. |
-| Customer portal | `https://portal.example.com` | Create API keys, set the webhook, manage DLT registrations, search messages. Its API is not for programmatic use (see [2.1](#21-api-keys)). |
+| Customer portal | `https://portal.example.com`, or your reseller's own domain | Create API keys, set the webhook, manage DLT registrations, search messages. Its API is not for programmatic use (see [2.1](#21-api-keys)). |
+| Receipts from HTTP vendors | `https://<DLR_HOST>/dlr/<vendor>?token=…`, e.g. `https://dlr.example.com/dlr/vendor-a?token=…` | Not for customers: only for vendors that carry the platform's traffic over HTTP. The platform's operations team gives each vendor its URL and token. Other paths on this host answer `404`. |
+
+`API_HOST` and `DLR_HOST` are the names your provider set up; the examples below use `api.example.com` for `API_HOST`.
 
 Both interfaces go through the same acceptance pipeline: the same number and sender checks, DLT checks, firewall, pricing and balance hold. A message is acknowledged (HTTP `202`, or `submit_sm_resp` with status 0) only after it is durably queued and its cost is held against your balance.
 

@@ -16,7 +16,7 @@ A platform user acts on any account. A reseller's user acts on the reseller's ow
 | Variable | Meaning |
 | --- | --- |
 | `OIDC_ISSUER` | Keycloak realm URL, e.g. `https://sso.example.com/realms/amaze`. Required outside `APP_ENV=dev`. |
-| `OIDC_AUDIENCE` | Client the tokens must be issued for (`azp` or `aud`); default `amaze-admin`. |
+| `OIDC_AUDIENCE` | Clients the tokens must be issued for (`azp` or `aud`), comma-separated; default `amaze-admin,amaze-portal`. |
 | `OIDC_DISCOVERY_URL` | Optional. Where to fetch discovery when it differs from the issuer (for example the Docker service name). |
 
 Tokens are checked for signature (realm keys, refreshed automatically), issuer, expiry and audience. The email must be verified and match an enabled user on an active account. A wrong or expired token gets 401; a valid token for someone with no platform user gets 403.
@@ -27,7 +27,7 @@ With `APP_ENV=dev` and no `OIDC_ISSUER`, the API falls back to `X-Actor-Account`
 
 1. Create a realm `amaze` in Keycloak. Import `deploy/keycloak/amaze-realm.json` as a starting point, then delete its demo user, turn off `directAccessGrantsEnabled`, set real redirect URIs, and require OTP for the realm.
 2. Create the people in Keycloak, with verified emails.
-3. Grant the first platform owner with the `admin-user` tool (from any machine that can reach PostgreSQL, with `POSTGRES_URL` set): `admin-user -email owner@yourcompany.com -role owner`.
+3. Create the platform account and grant its first owner with the `admin-user` tool (from any machine that can reach PostgreSQL, with `POSTGRES_URL` set): `admin-user -create-platform "Your Company" -email owner@yourcompany.com -role owner`. `-create-platform` does nothing if a platform account exists. On the VMs it is the compose service `admin-user` (profile `ops`) in `deploy/vm/app.yml`; see [setup-guide.md](setup-guide.md), step 3.10.
 4. After that, owners and admins grant access through the API: `POST /v1/accounts/{id}/users {"email":"…","role":"finance"}`.
 
 ## Dev (Docker Compose)

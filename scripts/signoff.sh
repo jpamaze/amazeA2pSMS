@@ -48,14 +48,46 @@ stage() { # name, then smpp-load flags
 
 case "${1:-}" in
 render-monitoring)
-  join() { local port=$1; shift; local out=""; for h in "$@"; do out+="'$h:$port', "; done; echo "${out%, }"; }
+  # Targets for every VM named in .env: the sign-off layout (APP_1/2, DATA_1,
+  # CH_1) or the HA layout (APP_1..3, PG_*, REDIS_*, CH_*, LB_*).
+  shopt -u patsub_replacement 2>/dev/null || true  # "&" in a value stays "&"
+  join() { local port=$1 out="" h; shift; for h in "$@"; do if [ -n "$h" ]; then out+="'$h:$port', "; fi; done; echo "${out%, }"; }
+  apps=("$APP_1" "$APP_2" "${APP_3:-}")
   app=""
-  for p in 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110 9111; do app+="$(join $p "$APP_1" "$APP_2"), "; done
-  sed -e "s|__APP_TARGETS__|${app%, }|" \
-      -e "s|__KAFKA_TARGETS__|$(join 9644 "$KAFKA_1" "$KAFKA_2" "$KAFKA_3")|" \
-      -e "s|__NODE_TARGETS__|$(join 9100 "$KAFKA_1" "$KAFKA_2" "$KAFKA_3" "$DATA_1" "$CH_1" "$APP_1" "$APP_2" "$SIM_1")|" \
-      "$VM/monitoring/prometheus.yml.tmpl" > "$VM/monitoring/prometheus.yml"
-  echo "wrote $VM/monitoring/prometheus.yml"
+  for p in 9101 9102 9103 9104 9105 9106 9107 9109 9110 9111; do app+="$(join $p "${apps[@]}"), "; done
+  pgs=("${PG_1:-}" "${PG_2:-}" "${PG_3:-}") rds=("${REDIS_1:-}" "${REDIS_2:-}" "${REDIS_3:-}")
+  chs=("${CH_1:-}" "${CH_2:-}" "${CH_3:-}") lbs=("${LB_1:-}" "${LB_2:-}")
+  nodes=("$KAFKA_1" "$KAFKA_2" "$KAFKA_3" "${apps[@]}" "${SIM_1:-}" "${MON_1:-}" "${lbs[@]}" "${rds[@]}" "${chs[@]}" "${pgs[@]}")
+  if [ -z "${PG_1:-}" ]; then nodes+=("${DATA_1:-}"); fi  # sign-off layout: PostgreSQL and Redis on DATA_1
+  t=$(<"$VM/monitoring/prometheus.yml.tmpl")
+  t=${t//__APP_TARGETS__/${app%, }}
+  t=${t//__KAFKA_TARGETS__/$(join 9644 "$KAFKA_1" "$KAFKA_2" "$KAFKA_3")}
+  t=${t//__NODE_TARGETS__/$(join 9100 $(printf '%s\n' "${nodes[@]}" | awk 'NF && !seen[$0]++'))}
+  t=${t//__PATRONI_TARGETS__/$(join 8008 "${pgs[@]}")}
+  t=${t//__REDIS_TARGETS__/$(join 9121 "${rds[@]}")}
+  ch=""; if [ -n "${PG_1:-}" ]; then ch=$(join 9363 "${chs[@]}"); fi  # HA ClickHouse only
+  t=${t//__CH_TARGETS__/$ch}
+  t=${t//__LB_TARGETS__/$(join 7001 "${lbs[@]}")}
+  printf '%s\n' "$t" > "$VM/monitoring/prometheus.yml"
+  q() { local v=${1-}; printf '%s' "${v//\'/\'\'}"; }  # inside single quotes in YAML
+  a=$(<"$VM/monitoring/alertmanager.yml.tmpl")
+  a=${a//__SMTP_HOST__/$(q "${SMTP_HOST:-localhost}")}
+  a=${a//__SMTP_PORT__/$(q "${SMTP_PORT:-587}")}
+  a=${a//__SMTP_FROM__/$(q "${SMTP_FROM:-alerts@example.com}")}
+  a=${a//__SMTP_USER__/$(q "${SMTP_USER:-}")}
+  a=${a//__SMTP_PASSWORD__/$(q "${SMTP_PASSWORD:-}")}
+  a=${a//__SMTP_REQUIRE_TLS__/$( [ "${SMTP_TLS:-starttls}" = starttls ] && echo true || echo false)}
+  a=${a//__ALERT_EMAIL_TO__/$(q "${ALERT_EMAIL_TO:-ops@example.com}")}
+  hook=""
+  if [ -n "${ALERT_WEBHOOK_URL:-}" ]; then hook="    webhook_configs:
+      - url: '$(q "$ALERT_WEBHOOK_URL")'
+        send_resolved: true"; fi
+  a=${a//__WEBHOOK__/$hook}
+  printf '%s\n' "$a" > "$VM/monitoring/alertmanager.yml"
+  # Holds the SMTP password: readable only by the container's user (nobody).
+  if [ "$(id -u)" = 0 ]; then chown 65534:65534 "$VM/monitoring/alertmanager.yml"; chmod 600 "$VM/monitoring/alertmanager.yml"
+  else chmod 644 "$VM/monitoring/alertmanager.yml"; echo "note: run as root to make alertmanager.yml readable by its container only"; fi
+  echo "wrote $VM/monitoring/prometheus.yml and alertmanager.yml"
   ;;
 run)
   mkdir -p "$VM/reports"

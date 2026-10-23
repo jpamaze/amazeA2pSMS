@@ -81,7 +81,7 @@ jobs:
     needs: [test, portal]
     strategy:
       matrix:
-        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, alerter, migrate, wallet-resync, soak-report, smpp-sim, http-sim, devseed]
+        service: [smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer, alerter, migrate, wallet-resync, soak-report, admin-user, billing-check, smpp-load, smpp-sim, http-sim, devseed]
     steps:
       - uses: actions/checkout@v4
       - run: docker build ${{ matrix.service == 'admin-api' && '--target admin-api' || '' }} --build-arg SERVICE=${{ matrix.service }} -t amaze-sms/${{ matrix.service }}:${{ github.sha }} .

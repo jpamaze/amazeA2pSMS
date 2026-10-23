@@ -1,9 +1,13 @@
-# Platform services. Run on APP_1 and APP_2 (NODE=app-1 / app-2):
+# Platform services. Run on every app VM (NODE=app-1, app-2, ...):
 #   NODE=app-1 docker compose -f app.yml --env-file .env up -d
 # One-off initialisation from any app VM (migrations, Kafka topics, seed data):
 #   docker compose -f app.yml --env-file .env --profile init run --rm migrate
 #   docker compose -f app.yml --env-file .env --profile init run --rm topics
-#   docker compose -f app.yml --env-file .env --profile init run --rm seed
+#   docker compose -f app.yml --env-file .env --profile init run --rm seed   # sign-off test data only
+# Production first start (instead of seed): create the platform account and
+# its first owner, who signs in with this e-mail through Keycloak:
+#   docker compose -f app.yml --env-file .env --profile ops run --rm admin-user \
+#     -create-platform "Your Company" -email you@example.com -role owner
 # Images: `docker compose -f app.yml build` (needs the repo checked out two
 # levels up) or pull ${REGISTRY}/<service>:${TAG} from your registry.
 name: amaze-app
@@ -47,16 +51,17 @@ services:
     image: ${REGISTRY}/http-api:${TAG}
     build: { <<: *build, args: { SERVICE: http-api } }
     environment: { <<: *env, OPS_ADDR: ":9102" }
-  # Needs Keycloak (OIDC_ISSUER) outside dev; not part of the load test.
+  # Portal and admin API. Needs Keycloak: it does not start without OIDC_ISSUER.
   admin-api:
     <<: *svc
-    profiles: [admin]
     image: ${REGISTRY}/admin-api:${TAG}
     build: { <<: *build, target: admin-api, args: { SERVICE: admin-api } }
     environment:
       <<: *env
       OPS_ADDR: ":9103"
       OIDC_ISSUER: "${OIDC_ISSUER:-}"
+      OIDC_AUDIENCE: "${OIDC_AUDIENCE:-amaze-admin,amaze-portal}"
+      OIDC_DISCOVERY_URL: "${OIDC_DISCOVERY_URL:-}"
       PORTAL_OIDC_ISSUER: "${PORTAL_OIDC_ISSUER:-}"
       PROMETHEUS_URL: "http://${MON_1}:9090"
   router:
@@ -86,15 +91,17 @@ services:
     image: ${REGISTRY}/dlr-processor:${TAG}
     build: { <<: *build, args: { SERVICE: dlr-processor } }
     environment: { <<: *env, OPS_ADDR: ":9106" }
-  connector-sim:
+  # Every vendor added in the portal (not disabled, with an enabled bind or an
+  # HTTP profile) runs here within 30 s, its route topic created on the way;
+  # edits to its binds or profile restart it. Every app VM opens every bind:
+  # with 3 app VMs, a vendor that allows 6 binds gets 2 bind rows in the portal.
+  # HTTP vendors send receipts to /dlr/<vendor> on DLR_ADDR (behind the
+  # balancers at https://<DLR_HOST>/dlr/<vendor>).
+  connector:
     <<: *svc
     image: ${REGISTRY}/connector:${TAG}
     build: { <<: *build, args: { SERVICE: connector } }
-    environment: { <<: *env, OPS_ADDR: ":9107", VENDOR_ID: sim }
-  connector-httpsim:
-    <<: *svc
-    image: ${REGISTRY}/connector:${TAG}
-    environment: { <<: *env, OPS_ADDR: ":9108", VENDOR_ID: httpsim, DLR_ADDR: ":8090" }
+    environment: { <<: *env, OPS_ADDR: ":9107", VENDOR_ID: "*", DLR_ADDR: ":8090", ROUTE_TOPIC_REPLICAS: "3" }
   alerter:
     <<: *svc
     image: ${REGISTRY}/alerter:${TAG}
@@ -161,6 +168,14 @@ services:
     restart: "no"
     image: ${REGISTRY}/wallet-resync:${TAG}
     build: { <<: *build, args: { SERVICE: wallet-resync } }
+  # Grants a person sign-in access; -create-platform also creates the
+  # platform account on a new installation (see the top of this file).
+  admin-user:
+    <<: *svc
+    profiles: [ops]
+    restart: "no"
+    image: ${REGISTRY}/admin-user:${TAG}
+    build: { <<: *build, args: { SERVICE: admin-user } }
   # Judges a soak test from Prometheus (scripts/signoff.sh soak-report).
   soak-report:
     <<: *svc

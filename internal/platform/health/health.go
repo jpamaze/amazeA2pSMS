@@ -33,6 +33,13 @@ func (r *Registry) Add(name string, fn CheckFunc) {
 	r.checks[name] = fn
 }
 
+// Remove drops the check registered under name.
+func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.checks, name)
+}
+
 // Result is the outcome of one check.
 type Result struct {
 	OK    bool   `json:"ok"`

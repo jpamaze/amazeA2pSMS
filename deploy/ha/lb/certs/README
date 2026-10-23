@@ -1,2 +1,7 @@
 # Put smpp.pem here: the certificate chain followed by the private key,
 # for SMPP over TLS on port 3550. Never commit the key.
+
+Put the HTTPS certificates in https/: one PEM per host name (chain followed
+by key), for the portal domain, API_HOST, DLR_HOST and every reseller's own
+portal domain. HAProxy picks the certificate by the name the client asks for,
+and refuses to start while this directory has none.

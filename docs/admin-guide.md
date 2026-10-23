@@ -7,7 +7,7 @@ This guide is for the people who run the web portal day to day:
 
 It describes what each page shows and does, who may use it, and what its error messages mean. It covers the portal only. The customer HTTP API is in `api/openapi.yaml`. How the platform is built is in the other files under `docs/`.
 
-Amounts are in Indian rupees (₹). Times are shown in IST.
+Amounts are in Indian rupees (₹). Times are shown in IST, except on `Messages` and `Reports`, which use the time zone you pick there (UTC unless you change it; see [Time zone](#time-zone)).
 
 ## Contents
 
@@ -191,8 +191,9 @@ The page title is `Welcome, <account name>`. It refreshes every 30 seconds.
 
    | Field | Meaning |
    | --- | --- |
-   | `From (IST date)` | First day to search. Defaults to yesterday |
-   | `To` | Day to stop at. Leave empty for "up to now" |
+   | `From` | First day to search, from midnight in the chosen time zone. Defaults to yesterday |
+   | `To (exclusive)` | Day to stop at; that day itself is not included. Leave empty for "up to now" |
+   | `Time zone` | The zone for the dates and the times shown. See [Time zone](#time-zone) |
    | `Status` | `accepted`, `submitted`, `delivered`, `failed`, `expired`, `rejected`, or `Any` |
    | `Mobile number` | The destination, e.g. `98XXXXXXXX` (with or without country code) |
    | `Sender` | The header the message was sent with, exact |
@@ -203,9 +204,7 @@ The page title is `Welcome, <account name>`. It refreshes every 30 seconds.
 
 Results are newest first, 100 at a time. Click `Load more` for the next 100. Click a row to open the message.
 
-Note: the server reads the `From` and `To` dates as midnight UTC (05:30 IST), not midnight IST. The `To` day itself is not included. To be sure of catching a whole IST day, widen the range by one day.
-
-**Result columns:** `Sent`, `To`, `Sender`, `Status`, `Error`, `Parts`, `Charged`, `Template`, `Reference`.
+**Result columns:** `Sent` (in the chosen zone, for example `Sent (IST)`), `To`, `Sender`, `Status`, `Error`, `Parts`, `Charged`, `Template`, `Reference`.
 
 #### Message statuses
 
@@ -230,7 +229,7 @@ The card title says `Live state` while the message is still in the live store (a
 | `Status`, `Error` | Current status and error code (see [Reading an error code](#reading-an-error-code)) |
 | `To`, `Sender`, `Parts` | Destination, header, number of SMS parts |
 | `Price` | Price per message as charged to this account |
-| `Accepted`, `Completed` | When we accepted it, and when it reached a final status |
+| `Accepted`, `Completed` | When we accepted it, and when it reached a final status, in the time zone last chosen on `Messages` or `Reports` (shown in the label, for example `Accepted (IST)`) |
 | `Network (MCC/MNC)` | The network the number was resolved to |
 | `DLT PE ID`, `DLT template`, `DLT category` | The DLT fields sent to the operator |
 | `Vendor`, `Vendor message ID` | Who carried it, and their ID for it |
@@ -245,13 +244,22 @@ Tip for platform and reseller staff: to open a message of an account you manage,
 
 **Who:** everyone. Platform and reseller users get an `Account` picker (their own account, or one they manage).
 
-There are three tabs: `Usage`, `Wallet statement` and `DLT`. Each has `From`, `To (exclusive)` and `Show`. The default range is the last 30 days up to and including today.
+There are three tabs: `Usage`, `Wallet statement` and `DLT`. Each has `From`, `To (exclusive)`, `Time zone` and `Show`. The default range is the last 30 days up to and including today. Changing the time zone reloads the tab.
 
-Note: as on the Messages page, the server reads these dates as midnight UTC (05:30 IST).
+#### Time zone
+
+The `Time zone` selector on `Messages` and `Reports` sets how dates are read and times are shown:
+- Choices: `UTC` (the default), `India (IST)`, `Dubai (GST)`, `Singapore (SGT)`, `London`, `New York`, and your device's own zone (marked `(this device)`).
+- Your choice is remembered in this browser, and used on both pages and on the message detail page.
+- `From` and `To` mean midnight in that zone. For example, with `India (IST)`, `From` 1 March covers from 00:00 IST on 1 March.
+- Times in tables carry the zone in the column title, for example `Day (IST)` or `When (UTC)`.
+- Usage days are grouped by days in that zone, and statement times (on screen and in the CSV) are in that zone.
+
+Other pages show times in IST.
 
 #### Usage
 
-Per day: `Messages`, `Parts`, `Delivered`, `Not delivered`, `Via sub-accounts`, `Charged`. Totals are shown above a bar chart.
+Per day (`Day`, in the chosen zone): `Messages`, `Parts`, `Delivered`, `Not delivered`, `Via sub-accounts`, `Charged`. Totals are shown above a bar chart.
 - `Via sub-accounts` counts messages your sub-accounts sent that were charged to you (resellers).
 - `Charged` is what this account was charged, as sender or as reseller.
 
@@ -261,13 +269,13 @@ Needs the message store. Without it the error is `usage reports need CLICKHOUSE_
 
 Shows the `Opening balance`, `Closing balance` and a total per entry kind (for example charge, topup, transfer, refund).
 
-The table lists top-ups, transfers and refunds one by one. Charges come in batches, thousands a day, so the table folds them into one row per day (`charges on <date>`).
+The table lists top-ups, transfers and refunds one by one. Charges come in batches, thousands a day, so the table folds them into one row per day in the chosen zone (`charges on <date>`).
 
 To download every ledger entry:
 1. Pick the account and the period.
 2. Click `Download CSV`.
 
-The CSV has the columns `at, kind, amount, balance_after, reference, messages, counterparty`. Text that would start with `=`, `+`, `-` or `@` is prefixed with `'`, so a spreadsheet does not run it as a formula.
+The CSV has the columns `at, kind, amount, balance_after, reference, messages, counterparty`. `at` is in the chosen time zone (with its offset, for example `+05:30`). Text that would start with `=`, `+`, `-` or `@` is prefixed with `'`, so a spreadsheet does not run it as a formula.
 
 A statement may hold at most 100,000 entries. Beyond that the error is `more than 100,000 entries; use a shorter period`.
 
@@ -837,14 +845,14 @@ The list shows:
 Needs admin.
 
 1. Click `New vendor`.
-2. Enter a `Name`, an `ID` (2–32 characters of a–z, 0–9 and `-`; it names the vendor's queue and its connector) and the `Protocol`.
+2. Enter a `Name`, an `ID` (2–32 characters of a–z, 0–9 and `-`; it names the vendor's queue and cannot be changed) and the `Protocol`.
 3. Click `Create`. The vendor page opens. New vendors start **paused**.
 
 #### The vendor page
 
 **`Status` card:**
 - `ID`, protocol, `Status` and `Routing`, with the reason and since when.
-- One row per running connector: binds up, sent and failed in the last 30 s, p95 submit time and rerouted messages. If none: `No connector is reporting. Start one with VENDOR_ID=<id>.`
+- One row per running connector (one per app server): binds up, sent and failed in the last 30 s, p95 submit time and rerouted messages. If none: `No connector is reporting. Connectors start a vendor within 30 seconds once it has an enabled bind or an HTTP profile and is not disabled.`
 - Admins see `Activate`, `Pause` and `Disable`. Routers apply status changes within 15 seconds.
 
 **`SMPP binds` tab** (SMPP vendors). Click `Add bind` and fill in:
@@ -862,14 +870,14 @@ Needs admin.
 | `TPS` | Positive |
 | `PE ID TLV`, `Template ID TLV`, `TM chain TLV` | The tag the vendor wants for each, like `0x1400`. Ask the vendor |
 
-The connector reads binds when it starts, so restart it after a change. `Disable` turns a bind off.
+The connectors apply a new or disabled bind within 30 seconds; the vendor reconnects. `Disable` turns a bind off. Every app server opens every enabled bind, so with three app servers a vendor that allows 6 binds needs 2 bind rows. Ask your operations team how many app servers there are.
 
 **`HTTP profile` tab** (HTTP vendors):
 - `Base URL`, `TPS`, `Concurrency` and `Secret`. Leave the secret empty to keep the stored one.
 - Four JSON boxes: `Auth`, `Request`, `Response` and `Receipts`. Each box has a hint listing its keys.
 - Click `Save profile`. The profile is checked the way the connector will load it, and errors are shown.
-- Admins see the receipt URL to give the vendor.
-- Restart the connector after saving.
+- Admins see the receipt path to give the vendor, with its token: the full URL is `https://<receipt host>/dlr/<vendor ID>?token=…`. Your operations team knows the receipt host (`DLR_HOST`).
+- The connectors apply a saved profile within 30 seconds.
 
 **`Failover` tab.** Takes the vendor out of routing when no bind is up, or when a limit is crossed. It brings it back after the cool-down once it is healthy. Queued messages move to the next route. 0 means not checked.
 
@@ -1102,7 +1110,7 @@ All steps are on the platform.
    - HTTP: `HTTP profile`: fill it in, `Save profile`, and give the vendor the receipt URL shown.
 3. **Costs.** `Costs` → `Import costs`. Least-cost routing ignores a vendor with no cost for a destination.
 4. **Error codes.** Get the vendor's receipt error codes, including its DLT codes. Import them on `Error codes` for this vendor.
-5. **Start its connector** with `VENDOR_ID=<id>`. This is a server task outside the portal. The `Status` card then shows a connector row and, for SMPP, binds up.
+5. **Wait for the connectors.** Within 30 seconds of step 2, the connectors start the vendor on their own; nothing needs to be done on the servers. The `Status` card then shows a connector row per app server and, for SMPP, binds up. A disabled vendor is not started.
 6. **Failover.** Review the `Failover` tab and save if you change anything.
 7. **Activate.** Click `Activate`.
 8. **Routes.**
@@ -1162,7 +1170,7 @@ Operator DLT receipt codes:
 4. Click `Download CSV` for every ledger entry.
 5. Use the `Usage` tab for messages, parts, delivery and charges per day.
 
-Remember the date note under [Reports](#reports): the period runs from 05:30 IST on the first day to 05:30 IST on the `To` day.
+Pick the `Time zone` first (see [Time zone](#time-zone)): the period runs from midnight on the first day to midnight on the `To` day, in that zone.
 
 **Resellers:** the `Usage` tab on your own account shows `Via sub-accounts`: what your sub-accounts sent that was charged to you. Run statements for each sub-account to see what you charged them.
 
@@ -1225,12 +1233,13 @@ The platform suspended it. Only the platform can lift that suspension.
 | Firewall rules | Within 30 seconds |
 | Number series | Within 5 minutes |
 | MNP imports | At once |
-| SMPP vendor binds and HTTP profiles | When the vendor's connector restarts |
+| SMPP vendor binds and HTTP profiles | Within 30 seconds (the vendor reconnects) |
+| New vendors, and disabling a vendor | Within 30 seconds (the connectors start or stop it) |
 
 **Why is the message I am looking for not in `Messages`?** Either:
 - it was refused at submit (refusals are not stored);
 - it belongs to another account (the page searches only your own);
-- the date range missed it (see the date note under [Messages](#messages)).
+- the date range missed it: dates are midnight in the chosen `Time zone`, and the `To` day is not included (see [Time zone](#time-zone)).
 
 **Can I delete an account, a rate card price, a route or a firewall rule?**
 - Routes, firewall rules, API keys, SMPP credentials, vendor binds and people can be **disabled**, revoked or removed. They stay listed as disabled.

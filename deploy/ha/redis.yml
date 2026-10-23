@@ -44,6 +44,16 @@ services:
           "sentinel parallel-syncs amaze 1" > /data/sentinel.conf
         exec redis-server /data/sentinel.conf --sentinel
     volumes: [sentinel:/data]
+  # Redis metrics for Prometheus on MON_1 (port 9121, private network only).
+  exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [redis]
+    environment:
+      REDIS_ADDR: redis://127.0.0.1:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_EXPORTER_WEB_LISTEN_ADDRESS: "${SELF}:9121"
 volumes:
   redisdata:
   sentinel:

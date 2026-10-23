@@ -18,7 +18,12 @@ services:
       PG_3: "${PG_3}"
       LB_PRIVATE_IP: "${SELF}"
       LB_STATS_PASSWORD: "${LB_STATS_PASSWORD}"
+      API_HOST: "${API_HOST}"
+      DLR_HOST: "${DLR_HOST}"
     # certs/smpp.pem: certificate chain + key for SMPP over TLS (port 3550).
+    # certs/https/*.pem: one per HTTPS name (portal, API_HOST, DLR_HOST,
+    # resellers' domains). Reload after adding one:
+    #   docker compose -f lb.yml --env-file .env kill -s HUP haproxy
     volumes: ["./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro", "./lb/certs:/usr/local/etc/haproxy/certs:ro"]
     ulimits: { nofile: { soft: 262144, hard: 262144 } }
   keepalived:

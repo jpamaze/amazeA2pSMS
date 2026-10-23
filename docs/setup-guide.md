@@ -10,7 +10,7 @@ It collects what is spread over [architecture.md](architecture.md), [signoff-5k.
 
 Two warnings before you start:
 - **Not yet run end to end on Docker.** The `deploy/ha` files were checked with `docker compose config`, `patroni --validate-config` and `haproxy -c`, and the same setup was rehearsed from native binaries on one machine (`scripts/ha-local.sh`). The HA Docker images themselves have not been built and run together yet (phase5-ha.md, Verification). Expect to fix small things on the first install, and do the first install on staging VMs.
-- **Some pieces are not in the repository.** TLS for the portal and HTTP API on the load balancer, the Keycloak server itself, Prometheus alert rules and connectors for real vendors have to be added by you. Each is called out where it comes up, and listed in [Gaps](#gaps-in-the-repository).
+- **Some pieces are not in the repository.** The Keycloak server itself, certificate renewal, backup alerts, log rotation and a production restore check have to be added by you. Each is called out where it comes up, and listed in [Gaps](#gaps-in-the-repository).
 
 Contents:
 1. [Overview](#1-overview)
@@ -49,12 +49,12 @@ Every service is one Go binary and one image (`Dockerfile`, `--build-arg SERVICE
 | router | Picks a vendor (least cost, priority, weighted), HLR lookups, failover | 9104 | — |
 | rater | Settles holds, writes the ledger in batches | 9105 | — |
 | dlr-processor | Matches vendor receipts, message state, customer receipts, expiry | 9106 | — |
-| connector | Sends to one vendor (`VENDOR_ID`) over SMPP or HTTP; one instance per vendor | 9107 (`connector-sim`), 9108 (`connector-httpsim`) | 8090 (`DLR_ADDR`, HTTP vendors only) |
+| connector | Sends to vendors over SMPP or HTTP. One `connector` service runs every vendor that is not disabled and has an enabled bind or an HTTP profile (`VENDOR_ID=*`) | 9107 | 8090 (`DLR_ADDR`, receipts from HTTP vendors at `/dlr/<vendor>`) |
 | webhook-dispatcher | Signed delivery-status webhooks to HTTP customers, with retries | 9109 | — |
 | ch-writer | Message history to ClickHouse; creates the ClickHouse tables | 9110 | — |
 | alerter | Low-balance alerts by e-mail, SMS and webhook | 9111 | — |
 
-One-off and operator tools: `migrate` (PostgreSQL schema), `admin-user` (first platform owner), `wallet-resync` (repairs Redis wallets from the ledger), `billing-check` (money and history cross-check), `soak-report` (judges a soak from Prometheus), `devseed` (demo data, refuses `APP_ENV=production`), `smpp-load`, `smpp-sim`, `http-sim` (load generator and vendor simulators).
+One-off and operator tools: `migrate` (PostgreSQL schema), `admin-user` (platform account and first platform owner), `wallet-resync` (repairs Redis wallets from the ledger), `billing-check` (money and history cross-check), `soak-report` (judges a soak from Prometheus), `devseed` (demo data, refuses `APP_ENV=production`), `smpp-load`, `smpp-sim`, `http-sim` (load generator and vendor simulators).
 
 Every service serves `/healthz` (process up), `/readyz` (every dependency reachable, else 503 with a JSON body naming them) and `/metrics` on its ops port.
 
@@ -68,10 +68,10 @@ Every service serves `/healthz` (process up), `/readyz` (every dependency reacha
 | redis-1..3 | `REDIS_1`..`REDIS_3` | Redis 7.2 + Sentinel | `deploy/ha/redis.yml` | Sentinel (quorum 2 of 3) |
 | ch-1..3 | `CH_1`..`CH_3` | ClickHouse 24.8, one shard, three replicas, embedded Keeper | `deploy/ha/clickhouse.yml` | clients move to the next replica |
 | kafka-1..3 | `KAFKA_1`..`KAFKA_3` | Redpanda (Kafka API), replication 3 | `deploy/vm/kafka.yml` | Raft leader election |
-| mon-1 | `MON_1` | Prometheus + Grafana | `deploy/vm/monitoring.yml` | — |
+| mon-1 | `MON_1` | Prometheus, Alertmanager and Grafana | `deploy/vm/monitoring.yml` | — |
 | sim-1 | `SIM_1` | vendor simulators and load generator (sign-off, drills, soak only) | `deploy/vm/sim.yml` | — |
 
-Put the three VMs of each tier in different availability zones or racks. On a public cloud, use its network load balancer (TCP pass-through) instead of lb-1/lb-2 and skip `lb.yml`.
+Put the three VMs of each tier in different availability zones or racks. On a public cloud, use its network load balancer (TCP pass-through) instead of lb-1/lb-2 and skip `lb.yml`; that balancer then has to terminate HTTPS and route by host name as `haproxy.cfg` does (step 3.12).
 
 ### Sizing
 
@@ -96,31 +96,36 @@ All VMs sit in one private network. Only the load balancers' virtual IP is reach
 | --- | --- | --- | --- |
 | 2775 | `LB_VIP` | SMPP (plain), to app VMs with PROXY protocol v2 | customers (internet) |
 | 3550 | `LB_VIP` | SMPP over TLS, terminated by HAProxy (`certs/smpp.pem`) | customers (internet) |
-| 8080 | `LB_VIP` | HTTP API (TCP pass-through, plain) | customers; see the TLS note below |
-| 8081 | `LB_VIP` | admin API and portal (TCP pass-through, plain) | staff, resellers, customers; see the TLS note below |
+| 443 | `LB_VIP` | HTTPS, terminated by HAProxy (`certs/https/`). By host name: `API_HOST` → HTTP API, `DLR_HOST` → HTTP-vendor receipts, every other name → portal and admin API | customers, staff, resellers, HTTP vendors (internet) |
+| 80 | `LB_VIP` | redirects to HTTPS only | internet |
+| 8080, 8081 | `LB_1`/`LB_2` private IP | plain HTTP API and portal, for operators and tools | operators |
 | 7000 | `LB_1`/`LB_2` private IP | HAProxy stats (user `admin`, `LB_STATS_PASSWORD`) | operators |
+| 7001 | `LB_1`/`LB_2` private IP | HAProxy Prometheus metrics (`/metrics`) | `MON_1` |
 | 5000, 5001 | `LB_1`/`LB_2` private IP | PostgreSQL primary / replicas, for operators and tools | operators |
 | VRRP (IP protocol 112) | between `LB_1` and `LB_2` | keepalived | the two LB VMs |
 | 2775, 8080, 8081 | app VMs | smpp-server, http-api, admin-api | LB VMs; `SIM_1` for load tests |
-| 8090 | app VMs | HTTP-vendor receipt endpoint (`/dlr/<vendor>?token=…`) | HTTP vendors; see [Gaps](#gaps-in-the-repository) |
-| 9101–9111 | app VMs | ops: `/healthz`, `/readyz`, `/metrics` | LB VMs (health checks on 9101, 9102, 9103), `MON_1` |
+| 8090 | app VMs | connector: HTTP-vendor receipts (`/dlr/<vendor>?token=…`) | LB VMs (vendors reach it as `https://DLR_HOST/dlr/<vendor>`) |
+| 9101–9107, 9109–9111 | app VMs | ops: `/healthz`, `/readyz`, `/metrics` | LB VMs (health checks on 9101, 9102, 9103, 9107), `MON_1` |
 | 5432 | PG VMs | PostgreSQL | app VMs, other PG VMs, LB VMs |
-| 8008 | PG VMs | Patroni REST (health open; changes need `PATRONI_REST_PASSWORD`) | PG and LB VMs only |
+| 8008 | PG VMs | Patroni REST (health and `/metrics` open; changes need `PATRONI_REST_PASSWORD`) | PG and LB VMs, and `MON_1` (metrics) |
 | 2379, 2380 | PG VMs | etcd client and peer | PG and LB VMs only (as `postgres.yml` says) |
 | 6379 | Redis VMs | Redis | app VMs, other Redis VMs |
 | 26379 | Redis VMs | Sentinel | app VMs, other Redis VMs |
+| 9121 | Redis VMs | redis_exporter (metrics) | `MON_1` |
 | 8123 | CH VMs | ClickHouse HTTP | app VMs, other CH VMs |
 | 9181, 9234 | CH VMs | Keeper client, Keeper Raft | other CH VMs |
+| 9363 | CH VMs | ClickHouse Prometheus metrics | `MON_1` |
 | ClickHouse interserver port | CH VMs | replication (ClickHouse default 9009; not set in the repository) | other CH VMs |
 | 9092 | Kafka VMs | Kafka API | app VMs, `SIM_1`, other Kafka VMs |
 | 33145 | Kafka VMs | Redpanda RPC | other Kafka VMs |
 | 9644 | Kafka VMs | Redpanda admin and metrics | `MON_1` |
 | 9100 | every VM | node-exporter | `MON_1` |
 | 9090 | `MON_1` | Prometheus | operators; app VMs (admin-api live monitor reads `http://MON_1:9090`) |
+| 9093 | `MON_1` | Alertmanager | operators (Prometheus reaches it on 127.0.0.1) |
 | 3000 | `MON_1` | Grafana | operators |
 | 2776, 2777 | `SIM_1` | SMPP and HTTP vendor simulators | app VMs |
 
-Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disable`; Redis, Kafka and ClickHouse are plain). That is accepted while the network carries nothing else (phase5-security.md, "Still open").
+`MON_1` also needs outbound access to the SMTP relay (`SMTP_HOST:SMTP_PORT`) and, if set, to `ALERT_WEBHOOK_URL`. Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disable`; Redis, Kafka and ClickHouse are plain). That is accepted while the network carries nothing else (phase5-security.md, "Still open").
 
 ---
 
@@ -132,12 +137,12 @@ Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disabl
 | Docker | Docker Engine 26+ and the Compose plugin on every VM, run by a user that cron can use too. |
 | Repository | A checkout on every VM. This guide uses `/opt/amaze`, the path `deploy/ha/backup.cron` expects. |
 | Images | Either build on each VM (`docker compose ... build`) or build once and push to your registry (`REGISTRY`, `TAG`). CI (`.github/workflows/ci.yml`, job `images`) builds every image but does not push them. |
-| DNS | Names pointing at `LB_VIP` (or the cloud balancer): one for SMPP, one for the HTTP API, one for the portal, plus one per reseller white-label domain (the reseller points a CNAME at the portal host). The repository does not fix these names. |
-| TLS certificates | **SMPP 3550:** chain followed by the private key, saved as `deploy/ha/lb/certs/smpp.pem` on both LB VMs (never commit it). **Portal and HTTP API:** you need certificates for their names and every reseller domain, but `haproxy.cfg` has no HTTPS listener yet: see [Gaps](#gaps-in-the-repository). |
+| DNS | A records pointing at `LB_VIP`'s public address (or the cloud balancer): one for SMPP, the portal's name, `API_HOST` (customers' HTTP API), `DLR_HOST` (HTTP vendors' receipts), plus one per reseller white-label domain (the reseller points a CNAME at the portal host). You choose the names; set `API_HOST` and `DLR_HOST` in `.env`. |
+| TLS certificates | **SMPP 3550:** chain followed by the private key, saved as `deploy/ha/lb/certs/smpp.pem` on both LB VMs. **HTTPS 443:** one PEM per name (chain followed by key) in `deploy/ha/lb/certs/https/` on both LB VMs: the portal's name, `API_HOST`, `DLR_HOST` and every reseller domain. HAProxy refuses to start while `https/` has none. Never commit the keys. |
 | Keycloak | A Keycloak server you run (the repository only has the dev one in `deploy/docker-compose.yml`, version 25.0.6, and the realm file `deploy/keycloak/amaze-realm.json`). Browsers and admin-api must reach it over HTTPS. |
 | S3 bucket | Any S3-compatible store (AWS S3, Google Cloud Storage with interoperability keys, MinIO with `S3_URI_STYLE=path`). One bucket, an access key limited to it, and a lifecycle rule expiring `clickhouse/` and `redis/` after 35 days. |
 | NFS share | From a machine outside the platform's failure domain, mounted at `BACKUP_NFS_PATH` (default `/mnt/backup`) on the PG, Redis and CH VMs. Any mounted disk works; the scripts only need a path. |
-| SMTP relay | For low-balance alert e-mails (optional). |
+| SMTP relay | For monitoring alerts (Alertmanager e-mails `ALERT_EMAIL_TO`) and low-balance alert e-mails to customers. |
 | HLR provider | Optional; without `HLR_URL`, MNP and number series still apply. |
 | Secrets store | Somewhere outside the platform for `BACKUP_CIPHER_PASS` (a password manager or a sealed envelope): PostgreSQL backups cannot be restored without it. |
 
@@ -171,7 +176,7 @@ Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disabl
 ### 3.2 Write the `.env` file
 
 1. Copy `deploy/ha/env.example` to `deploy/ha/.env`, fill it in, and copy the same file to `deploy/vm/.env`. **The same file goes on every VM, in both places.** The app, Kafka and monitoring files in `deploy/vm` read the same variables.
-2. `deploy/ha/env.example` does not carry the portal, alert and HLR settings; copy them in from `deploy/vm/env.example`, and add `OIDC_ISSUER`, which neither example has but admin-api needs in production.
+2. Fill in the public names (`API_HOST`, `DLR_HOST`), sign-in (`OIDC_ISSUER`, step 3.9), where monitoring alerts go (`ALERT_EMAIL_TO`, and the `SMTP_*` relay) and, if you use them, the `HLR_*` and `ALERT_SMS_*` settings. `deploy/ha/env.example` has all of them.
 3. Generate the secrets:
    ```sh
    openssl rand -hex 32        # SECRETS_KEY (exactly 64 hex characters)
@@ -244,15 +249,16 @@ Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disabl
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `S3_ENDPOINT` | yes | `s3.ap-south-1.amazonaws.com` | Host name of the S3-compatible service (no scheme) |
-| `S3_PORT` | no | `443` | Port for pgBackRest. The Redis and ClickHouse backup scripts ignore it: see [Gaps](#gaps-in-the-repository). |
+| `S3_PORT` | no | `443` | Port of the S3 service (pgBackRest, Redis and ClickHouse backups) |
 | `S3_REGION` | yes | `ap-south-1` | Region |
 | `S3_BUCKET` | yes | `amaze-sms-backups` | Bucket |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | yes | empty | Key limited to the bucket |
 | `S3_URI_STYLE` | no | `host` | `path` for MinIO and most self-hosted stores |
+| `S3_VERIFY_TLS` | no | `y` | `n` only for a store with a self-signed certificate (PostgreSQL and Redis backups) |
 | `BACKUP_NFS_PATH` | yes | `/mnt/backup` | Where the NFS share is mounted on PG, Redis and CH VMs |
 | `BACKUP_RETENTION_FULL_S3` | no | `4` | PostgreSQL weekly fulls kept in S3 |
 | `BACKUP_RETENTION_FULL_NFS` | no | `2` | PostgreSQL fulls kept on NFS |
-| `BACKUP_KEEP_DAYS` | no | `35` | Redis copies kept on NFS (the ClickHouse container is not passed this value and always uses 35) |
+| `BACKUP_KEEP_DAYS` | no | `35` | Days of Redis and ClickHouse copies kept on NFS (S3 copies expire by the bucket's lifecycle rule) |
 
 **Sizing**
 
@@ -264,22 +270,40 @@ Nothing inside the private network is encrypted (PostgreSQL uses `sslmode=disabl
 | `REDPANDA_SMP` | `6` | Redpanda cores |
 | `REDPANDA_MEMORY` | `24G` | Redpanda memory |
 
+**Public names** (read by `lb.yml`)
+
+| Variable | Required | Default (example) | Meaning |
+| --- | --- | --- | --- |
+| `API_HOST` | yes | `api.example.com` | Name customers use for the HTTP API (`https://API_HOST/v1/...`) |
+| `DLR_HOST` | yes (HTTP vendors) | `dlr.example.com` | Name HTTP vendors post receipts to (`https://DLR_HOST/dlr/<vendor>?token=…`); other paths answer 404 |
+
+Every other name pointed at the balancers (the portal's own name, resellers' domains) goes to the portal.
+
 **Sign-in and portal**
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `OIDC_ISSUER` | yes | empty | Keycloak realm URL, e.g. `https://sso.example.com/realms/amaze`. admin-api refuses to start without it outside `APP_ENV=dev`. Not in either env example. |
+| `OIDC_ISSUER` | yes | empty | Keycloak realm URL, e.g. `https://sso.example.com/realms/amaze`. admin-api refuses to start without it outside `APP_ENV=dev`. |
+| `OIDC_AUDIENCE` | no | `amaze-admin,amaze-portal` | Client IDs whose tokens are accepted; admin-api refuses to start with it empty |
+| `OIDC_DISCOVERY_URL` | no | empty | Only if admin-api reaches Keycloak at another URL than `OIDC_ISSUER` |
 | `PORTAL_OIDC_ISSUER` | no | empty (uses `OIDC_ISSUER`) | Realm URL browsers use, when it differs from `OIDC_ISSUER` |
 
-**Alerts (alerter)**
+**Monitoring alerts (Alertmanager on `MON_1`)**
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `SMTP_HOST` | for e-mail alerts | empty | SMTP relay; empty means e-mail is not configured (recorded on each alert) |
+| `ALERT_EMAIL_TO` | yes | `ops@example.com` | Where Prometheus alerts are e-mailed, through the `SMTP_*` relay below |
+| `ALERT_WEBHOOK_URL` | no | empty | Also post alerts here (for example a Slack, Teams or PagerDuty bridge) |
+
+**E-mail and customer alerts (alerter, Alertmanager)**
+
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `SMTP_HOST` | yes (alert e-mails) | empty | SMTP relay. For alerter, empty means e-mail is not configured (recorded on each alert). |
 | `SMTP_PORT` | no | `587` | |
 | `SMTP_USER`, `SMTP_PASSWORD` | no | empty | |
 | `SMTP_FROM` | for e-mail alerts | `alerts@example.com` in the example | Sender |
-| `SMTP_TLS` | no | `starttls` | `starttls`, `tls` or `none` |
+| `SMTP_TLS` | no | `starttls` | `starttls`, `tls` or `none` (Alertmanager requires STARTTLS only for `starttls`) |
 | `ALERT_SMS_URL` | for SMS alerts | empty | The platform's own HTTP API, used as an alerts account |
 | `ALERT_SMS_API_KEY` | for SMS alerts | empty | API key of that alerts account |
 | `ALERT_SMS_SENDER` | for SMS alerts | empty | Sender ID (a DLT header registered for the alerts account) |
@@ -314,8 +338,6 @@ The services read more settings than `app.yml` passes. Their defaults suit produ
 | `LOG_LEVEL` | all | `info` (fixed in `app.yml`) | |
 | `OPS_ADDR` | all | `:9090` (set per service in `app.yml`) | Ops endpoints |
 | `SERVICE_NAME` | all | the service name | Log field |
-| `OIDC_AUDIENCE` | admin-api | `amaze-admin,amaze-portal` | Client IDs whose tokens are accepted; admin-api refuses to start with it empty |
-| `OIDC_DISCOVERY_URL` | admin-api | empty | Fetch OIDC discovery here when it differs from the issuer |
 | `PORTAL_OIDC_CLIENT_ID` | admin-api | `amaze-portal` | Public client the portal signs in with |
 | `PORTAL_DIR` | admin-api | `/portal` (set in the image) | Portal static export |
 | `ADMIN_ADDR` | admin-api | `:8081` | |
@@ -334,8 +356,11 @@ The services read more settings than `app.yml` passes. Their defaults suit produ
 | `HLR_TIMEOUT`, `HLR_CACHE_TTL`, `HLR_CONCURRENCY` | router | `2s`, `48h`, `64` | |
 | `DLR_TIMEOUT` | dlr-processor | `72h` | Messages with no receipt by then expire (must stay below 96 h) |
 | `RECONCILE_EVERY` | dlr-processor | `1m` | |
-| `VENDOR_ID` | connector | required | Vendor this connector serves |
-| `DLR_ADDR` | connector | `:8090` | HTTP vendors' receipt listener; give each HTTP-vendor connector on a VM its own port |
+| `VENDOR_ID` | connector | `*` (set in `app.yml`) | `*` runs every vendor that is not disabled and has an enabled bind or an HTTP profile; `<id>` runs that one vendor only |
+| `VENDOR_RESCAN` | connector | `30s` | How often the vendor list is read: new vendors start, changed ones restart, disabled ones stop |
+| `ROUTE_TOPIC_PARTITIONS` | connector | `24` | Partitions of a vendor's `sms.route.<vendor>` topic when the connector creates it |
+| `ROUTE_TOPIC_REPLICAS` | connector | `-1` (`3` in `app.yml`) | Replicas of that topic; `-1` is the broker's default. Above 1, `min.insync.replicas` is set to 2 |
+| `DLR_ADDR` | connector | `:8090` (set in `app.yml`) | HTTP vendors' receipt listener (`/dlr/<vendor>`) |
 | `WEBHOOK_WORKERS` | webhook-dispatcher | `128` | |
 | `WEBHOOK_ALLOW_PRIVATE` | webhook-dispatcher, alerter | `false` | Dev only: allow webhooks to private addresses. Keep `false`. |
 | `ALERT_EVERY` | alerter | `30s` | Check interval |
@@ -347,20 +372,13 @@ On each VM that runs a given file, or once and push to `REGISTRY`:
 
 ```sh
 cd /opt/amaze/deploy/vm
-docker compose -f app.yml --env-file .env --profile init --profile ops --profile admin build
+docker compose -f app.yml --env-file .env --profile init --profile ops build
 docker compose -f sim.yml --env-file .env build            # only if you run the sign-off, drills or soak
 cd /opt/amaze/deploy/ha
 docker compose -f postgres.yml --env-file .env build       # PostgreSQL 16 + Patroni 4.0.4 + pgBackRest
 ```
 
-The other files use public images (`redis:7.2`, `clickhouse/clickhouse-server:24.8`, `redpandadata/redpanda:v24.2.7`, `quay.io/coreos/etcd:v3.5.17`, `haproxy:2.8`, `osixia/keepalived:2.0.20`, `prom/prometheus:v2.54.1`, `grafana/grafana:11.2.0`, `prom/node-exporter:v1.8.2`).
-
-`admin-user` is in no compose file. Build its image yourself for step 3.10:
-
-```sh
-cd /opt/amaze
-docker build --build-arg SERVICE=admin-user -t amaze-sms/admin-user:release .
-```
+The other files use public images (`redis:7.2`, `clickhouse/clickhouse-server:24.8`, `redpandadata/redpanda:v24.2.7`, `quay.io/coreos/etcd:v3.5.17`, `haproxy:2.8`, `osixia/keepalived:2.0.20`, `oliver006/redis_exporter:v1.62.0`, `prom/prometheus:v2.54.1`, `prom/alertmanager:v0.27.0`, `grafana/grafana:11.2.0`, `prom/node-exporter:v1.8.2`).
 
 ### 3.4 Kafka (Redpanda) on kafka-1..3
 
@@ -371,7 +389,7 @@ BROKER=2 SELF=10.0.1.12 docker compose -f kafka.yml --env-file .env up -d     # 
 BROKER=3 SELF=10.0.1.13 docker compose -f kafka.yml --env-file .env up -d     # on kafka-3
 ```
 
-Topic auto-creation is off (`auto_create_topics_enabled=false`); topics are created in step 3.8.
+Topic auto-creation is off (`auto_create_topics_enabled=false`); the platform's topics are created in step 3.8, and each vendor's route topic by the connector.
 
 ### 3.5 PostgreSQL: etcd, its authentication, Patroni, pgBackRest
 
@@ -415,7 +433,7 @@ SELF=10.0.1.32 docker compose -f redis.yml --env-file .env up -d    # redis-2
 SELF=10.0.1.33 docker compose -f redis.yml --env-file .env up -d    # redis-3
 ```
 
-The configuration is written into the volume on first start only; afterwards Sentinel rewrites it, so a restarted node comes back in its current role. Changing `REDIS_PASSWORD`, `REDIS_SENTINEL_PASSWORD` or `REDIS_MAXMEMORY` later means editing `/data/redis.conf` and `/data/sentinel.conf` in the volumes.
+This also starts `exporter` (redis_exporter, metrics on `SELF:9121` for Prometheus). The configuration is written into the volume on first start only; afterwards Sentinel rewrites it, so a restarted node comes back in its current role. Changing `REDIS_PASSWORD`, `REDIS_SENTINEL_PASSWORD` or `REDIS_MAXMEMORY` later means editing `/data/redis.conf` and `/data/sentinel.conf` in the volumes.
 
 Check (on a Redis VM, with `.env` loaded into the shell):
 
@@ -434,7 +452,7 @@ NODE_NAME=ch-2 KEEPER_ID=2 SELF=10.0.1.42 docker compose -f clickhouse.yml --env
 NODE_NAME=ch-3 KEEPER_ID=3 SELF=10.0.1.43 docker compose -f clickhouse.yml --env-file .env up -d   # ch-3
 ```
 
-On first start `clickhouse/init.sh` creates the `sms` database with the `Replicated` engine, so the tables ch-writer creates on one replica appear on all three. Nothing else needs to be created by hand.
+On first start `clickhouse/init.sh` creates the `sms` database with the `Replicated` engine, so the tables ch-writer creates on one replica appear on all three. Nothing else needs to be created by hand. Each replica serves Prometheus metrics on port 9363 (`clickhouse/cluster.xml`).
 
 ### 3.8 Initialise the schema and topics (from app-1)
 
@@ -447,10 +465,7 @@ docker compose -f app.yml --env-file .env --profile init run --rm topics
 - **migrate** applies `migrations/postgres/0001`–`0014` in order, each in its own transaction, under an advisory lock (safe to run again; applied versions are in `schema_migrations`).
 - **ClickHouse tables** (`migrations/clickhouse`) are created by ch-writer when it starts (`CLICKHOUSE_ENSURE_SCHEMA=true`).
 - **topics** runs `deploy/kafka-topics.sh` with 24 partitions and 3 replicas (`min.insync.replicas=2`): `sms.submit`, `sms.reroute`, `sms.status`, `sms.dlr`, `sms.mo`, `sms.webhooks`, `sms.records` (72 h), `sms.billing.events`, `sms.config.changes`, `sms.webhooks.retry.1`–`4`, `sms.webhooks.dead` (7 days), and `sms.route.<vendor>` for `VENDORS: sim httpsim`.
-- **Real vendors** each need their own `sms.route.<vendor>` topic. Create them by overriding `VENDORS` (it skips topics that exist):
-  ```sh
-  docker compose -f app.yml --env-file .env --profile init run --rm -e VENDORS="vendor-a vendor-b" topics
-  ```
+- **Real vendors' topics** (`sms.route.<vendor>`) are created by the connector when it first starts the vendor, with the same settings (24 partitions, 3 replicas, 72 h, zstd, `min.insync.replicas=2`). Nothing to do by hand.
 
 Do **not** run `seed` in production: it creates demo accounts and routes to the simulator, and it refuses `APP_ENV=production` anyway.
 
@@ -470,39 +485,33 @@ Following [admin-auth.md](admin-auth.md):
 
 ### 3.10 Platform account and first platform admin
 
-1. **Create the platform account.** `migrate` does not create one and `devseed` (which does in dev) refuses production, so insert it once with SQL on the PostgreSQL leader (see [Gaps](#gaps-in-the-repository)):
+1. **Create the platform account and grant its first owner** in one step, from one app VM (the e-mail exactly as in Keycloak):
    ```sh
-   cd /opt/amaze/deploy/ha
-   docker compose -f postgres.yml --env-file .env exec patroni \
-     psql -h /var/run/postgresql -U postgres -d sms -c "INSERT INTO accounts (role, name) VALUES ('platform', 'Your Company')"
+   cd /opt/amaze/deploy/vm
+   docker compose -f app.yml --env-file .env --profile ops run --rm admin-user \
+     -create-platform "Your Company" -email owner@yourcompany.com -role owner
    ```
-   This is the same statement devseed uses. There must be exactly one account with role `platform`.
-2. **Grant the first owner** (any machine that reaches PostgreSQL; the e-mail exactly as in Keycloak):
-   ```sh
-   set -a; . /opt/amaze/deploy/vm/.env; set +a
-   docker run --rm --network host -e POSTGRES_URL="$POSTGRES_URL" amaze-sms/admin-user:release \
-     -email owner@yourcompany.com -role owner
-   ```
-   Roles: `owner`, `admin`, `finance`, `support`, `viewer`. `-account <id>` grants on another account.
+   `-create-platform` creates the account with role `platform` only if none exists; run again, it prints `a platform account exists already; left as it is` and just grants the user. `migrate` does not create the platform account, and `seed` must not be run in production.
+2. **More platform staff** the same way without `-create-platform`: `... run --rm admin-user -email someone@yourcompany.com -role admin`. Roles: `owner`, `admin`, `finance`, `support`, `viewer`. `-account <id>` grants on another account.
 3. Everyone else is granted from the portal (Team page) or `POST /v1/accounts/{id}/users {"email":"…","role":"finance"}`.
 
 ### 3.11 Platform services on app-1..3
 
-admin-api is in the compose profile `admin`, so name it, or it does not start (and the balancer's portal health check on 9103 fails):
-
 ```sh
 cd /opt/amaze/deploy/vm
-NODE=app-1 docker compose -f app.yml --env-file .env --profile admin up -d     # app-1
-NODE=app-2 docker compose -f app.yml --env-file .env --profile admin up -d     # app-2
-NODE=app-3 docker compose -f app.yml --env-file .env --profile admin up -d     # app-3
+NODE=app-1 docker compose -f app.yml --env-file .env up -d     # app-1
+NODE=app-2 docker compose -f app.yml --env-file .env up -d     # app-2
+NODE=app-3 docker compose -f app.yml --env-file .env up -d     # app-3
 ```
 
-This starts smpp-server, http-api, admin-api, router, rater, dlr-processor, webhook-dispatcher, ch-writer, alerter and the two simulator connectors (`connector-sim`, `connector-httpsim`). For real vendors, see step 3.14.
+This starts smpp-server, http-api, admin-api, router, rater, dlr-processor, connector, webhook-dispatcher, ch-writer and alerter. admin-api starts by default and needs `OIDC_ISSUER` (step 3.9); without it, it exits and the balancer's portal health check on 9103 fails.
+
+The one `connector` service runs every vendor that is not disabled and has an enabled bind or an HTTP profile. Vendors added in the portal start within 30 seconds (`VENDOR_RESCAN`), a vendor whose binds or HTTP profile change is restarted with the new settings, and a disabled vendor is stopped. There are no per-vendor services to add (step 3.15).
 
 Check each service:
 
 ```sh
-for p in 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110 9111; do
+for p in 9101 9102 9103 9104 9105 9106 9107 9109 9110 9111; do
   printf '%s %s\n' $p "$(curl -s -o /dev/null -w '%{http_code}' http://10.0.1.51:$p/readyz)"
 done
 ```
@@ -512,39 +521,60 @@ Every line should say 200. A 503 body names the dependency that failed.
 ### 3.12 Load balancers on lb-1 and lb-2
 
 1. Put `smpp.pem` (chain, then key) in `deploy/ha/lb/certs/` on both.
-2. Start them:
+2. Put one PEM per HTTPS name (chain, then key) in `deploy/ha/lb/certs/https/` on both: the portal's name, `API_HOST`, `DLR_HOST` and every reseller domain. HAProxy picks the certificate by the name the client asks for (SNI), and refuses to start while this folder has none.
+3. Check that `API_HOST` and `DLR_HOST` are set in `.env`, and that DNS for every name points at `LB_VIP`'s public address.
+4. Start them:
    ```sh
    cd /opt/amaze/deploy/ha
    SELF=10.0.1.61 LB_PRIORITY=150 docker compose -f lb.yml --env-file .env up -d   # lb-1
    SELF=10.0.1.62 LB_PRIORITY=100 docker compose -f lb.yml --env-file .env up -d   # lb-2
    ```
-3. What HAProxy does (`lb/haproxy.cfg`, TCP mode):
-   - **SMPP** `:2775` and `:3550` (TLS) → app `:2775`, least connections, `send-proxy-v2`, health from `/readyz` on 9101;
-   - **HTTP API** `:8080` → app `:8080`, health on 9102;
-   - **Portal and admin API** `:8081` → app `:8081`, health on 9103;
+5. What HAProxy does (`lb/haproxy.cfg`):
+   - **SMPP** `:2775` and `:3550` (TLS) → app `:2775`, TCP, least connections, `send-proxy-v2`, health from `/readyz` on 9101;
+   - **HTTPS** `:443` (port 80 only redirects to HTTPS), routed by host name:
+     - `API_HOST` → HTTP API, app `:8080`, health on 9102;
+     - `DLR_HOST` → connector receipts, app `:8090`, health on 9107; only paths under `/dlr/` pass, anything else gets 404;
+     - every other name (the portal's name, resellers' domains) → portal and admin API, app `:8081`, health on 9103;
+     - it sets `X-Forwarded-For` to the client address (replacing what the client sent; admin-api records it in the audit log) and `X-Forwarded-Proto: https` (admin-api then sends HSTS);
+   - **plain HTTP API and portal** on `LB:8080` and `LB:8081`, private address only, for operators and tools;
    - **PostgreSQL** primary `LB:5000` and replicas `LB:5001` on the private address, health from Patroni (`OPTIONS /primary`, `/replica` on 8008);
-   - **stats** on `LB:7000`.
+   - **stats** on `LB:7000` and **Prometheus metrics** on `LB:7001/metrics`, private address only.
    An app VM is taken out after 3 failed checks 2 s apart, and its sessions are shut down so SMPP binds reconnect elsewhere.
-4. On a public cloud, skip this and point a TCP network load balancer at the same app ports and health checks. smpp-server then needs PROXY v2 from that balancer's addresses (`SMPP_PROXY_PROTOCOL_FROM`).
+6. **Adding or renewing a certificate** (for example a new reseller domain): put its PEM in `certs/https/` on both LB VMs and reload HAProxy on each:
+   ```sh
+   cd /opt/amaze/deploy/ha && docker compose -f lb.yml --env-file .env kill -s HUP haproxy
+   ```
+7. On a public cloud, skip this and use the cloud's balancer. It has to terminate HTTPS and route by host name as above, and pass SMPP as TCP with PROXY v2 (smpp-server then needs that balancer's addresses in `SMPP_PROXY_PROTOCOL_FROM`).
 
 ### 3.13 Monitoring on mon-1
 
 ```sh
 cd /opt/amaze
-scripts/signoff.sh render-monitoring        # writes deploy/vm/monitoring/prometheus.yml from deploy/vm/.env
+scripts/signoff.sh render-monitoring        # writes prometheus.yml and alertmanager.yml in deploy/vm/monitoring/ from deploy/vm/.env
 cd deploy/vm && docker compose -f monitoring.yml --env-file .env up -d
 ```
 
+Run `render-monitoring` again, and restart Prometheus and Alertmanager, after changing the VMs, `SMTP_*` or `ALERT_*` in `.env`. `alertmanager.yml` holds the SMTP password and is written readable by its owner only.
+
 - **Grafana:** `http://MON_1:3000`, user `admin` / `GRAFANA_ADMIN_PASSWORD`, dashboard **SMS sign-off** (accepted vs final, in flight, accept latency, refusals by reason, vendor submits and latency, DLRs, final status, consumer throughput and batch time per group, host and service CPU, webhooks, binds).
 - **Prometheus:** keeps 30 days, scrapes every 5 s.
-- **render-monitoring writes the sign-off targets only:** app ops ports on `APP_1` and `APP_2`, Redpanda on the three Kafka VMs, and node-exporter on Kafka, `DATA_1`, `CH_1`, `APP_1`, `APP_2` and `SIM_1`. In the HA layout, edit `deploy/vm/monitoring/prometheus.yml` afterwards to add `APP_3` (ports 9101–9111) and node-exporter (`:9100`) on every PG, Redis, CH, LB and the other app VMs, then restart Prometheus.
-- **Alerts:** the repository has no Prometheus alert rules and no Alertmanager. Add your own. Signals the docs name:
-  - any service `/readyz` failing, or its target down;
-  - `sms_vendor_routable{vendor=...} == 0` (failover took a vendor out), `sms_rerouted_total` rising;
-  - `sms_consumer_batch_retries_total` rising (a store is failing over or down);
-  - `sms_records_dropped_total` rising (history rows skipped);
-  - refusals by reason at the edge;
-  - backups: PostgreSQL `pg_stat_archiver.failed_count` rising, `backup.sh info` showing a newest backup older than 8 days, and errors in ClickHouse `system.backups` (phase5-ha.md, "Setting up backups"). There is no PostgreSQL, Redis or ClickHouse exporter in the repository, so these need an exporter or a cron check of your own.
+- **Targets:** `render-monitoring` scrapes every VM named in `.env`, for either layout (sign-off or HA):
+  - app ops ports 9101–9107 and 9109–9111 on `APP_1`, `APP_2` and `APP_3`;
+  - Redpanda on the three Kafka VMs (9644);
+  - node-exporter (9100) on every VM;
+  - HA layout only: Patroni on the PG VMs (8008), redis_exporter on the Redis VMs (9121), ClickHouse on the CH VMs (9363) and HAProxy on `LB_1`/`LB_2` (7001).
+  The firewall must let `MON_1` reach all of these ([network table](#network-and-firewall)).
+- **Alerts:** Prometheus evaluates the rules in `deploy/vm/monitoring/alerts.yml` (25 rules) and Alertmanager (`http://MON_1:9093`) e-mails them to `ALERT_EMAIL_TO` through the `SMTP_*` relay, and also posts them to `ALERT_WEBHOOK_URL` if set. Resolved alerts are sent too. `critical` (act now) repeats every hour, `warning` (look today) every 4 hours.
+
+  | Group | Main alerts |
+  | --- | --- |
+  | availability | a scrape target down 2 min; messages accepted but none reach a vendor; submits refused as `unavailable`; p99 accept time over 250 ms; a consumer retrying batches; history rows dropped; customer webhooks given up |
+  | vendors | a vendor with no SMPP bind up; out of routing 10 min (failover); over 20% of submits failing; under 50% of receipts `DELIVRD` |
+  | data | PostgreSQL not exactly one primary, or down; Redis not exactly one primary, fewer than 2 replicas, over 85% of maxmemory; ClickHouse read-only replicas; Kafka partitions without a leader or replicas behind |
+  | balancers | a HAProxy back end with no healthy server; a server out |
+  | machines | disk under 15% / 5% free, memory under 10% available, CPU over 90% busy |
+
+- **Backups are not alerted on.** Check them yourself, or add a cron check: PostgreSQL `pg_stat_archiver.failed_count` rising, `backup.sh info` showing a newest backup older than 8 days, and errors in ClickHouse `system.backups` (phase5-ha.md, "Setting up backups").
 
 ### 3.14 Backups schedule
 
@@ -572,14 +602,15 @@ Sign in to the portal as the platform owner and set up, in this order (pages und
 4. **Error codes:** vendor receipt codes mapped to a reason and customer code.
 5. **Vendors:** for each vendor:
    1. **Vendors → New vendor** (starts paused); add SMPP binds (with DLT TLV tags) or the HTTP profile; import costs.
-   2. Create its topic (step 3.8) and **add a connector for it on every app VM.** `app.yml` only defines `connector-sim` and `connector-httpsim`. Add a service per vendor modelled on `connector-sim`, with `VENDOR_ID: <id>` and its own `OPS_ADDR`, plus its own `DLR_ADDR` for an HTTP vendor, and add the new ops port to Prometheus. Connectors read binds and profiles at start, so restart them after changes.
-   3. HTTP vendors post receipts to `/dlr/<vendor>?token=…` on the connector's `DLR_ADDR` (the portal shows the path to admins). That listener is on the app VMs and the balancer does not forward it: see [Gaps](#gaps-in-the-repository).
-   4. Optionally set a failover policy, then **activate** the vendor.
+   2. **Nothing to deploy.** Within 30 seconds the connector on every app VM starts the vendor, creating its `sms.route.<vendor>` topic on the way. Bind or profile edits restart it there within 30 seconds (the vendor reconnects); disabling the vendor stops it.
+   3. **Bind count:** every app VM opens every enabled bind. With three app VMs, a vendor that allows 6 binds gets 2 bind rows in the portal.
+   4. HTTP vendors post receipts to `https://<DLR_HOST>/dlr/<vendor>?token=…` (the portal shows the path, with its token, to admins). Give the vendor that URL.
+   5. Optionally set a failover policy, then **activate** the vendor.
 6. **Routes:** default and per-account (least cost, priority, weighted; HLR options).
 7. **Firewall:** block lists and pumping-guard limits.
-8. **Simulator vendors:** in production, leave `sim` and `httpsim` unused (they have no binds or profile unless seeded), or remove their connector services from your `app.yml`.
+8. **Simulator vendors:** in production, `sim` and `httpsim` have no binds or profile unless seeded, so the connector does not run them. If you seeded for the sign-off, disable them afterwards.
 9. **Alerts account** (for SMS alerts): a customer account with an API key, a DLT PE ID, header and a template matching `ALERT_SMS_TEMPLATE`, e.g. `Low balance alert for {#var#}: {#var#} available, alert level {#var#}. Please add funds.`. Put its key and sender in `ALERT_SMS_API_KEY` / `ALERT_SMS_SENDER`, with `ALERT_SMS_URL` pointing at the HTTP API, and restart alerter.
-10. **Resellers and customers:** create accounts, top up, set credit limits (default 0), DLT registrations (PE IDs, headers, templates, TM chain), SMPP credentials and API keys. For a reseller domain: set it on the reseller's branding (platform only), add its certificate on the balancer, and add its redirect URIs in Keycloak (step 3.9).
+10. **Resellers and customers:** create accounts, top up, set credit limits (default 0), DLT registrations (PE IDs, headers, templates, TM chain), SMPP credentials and API keys. For a reseller domain: set it on the reseller's branding (platform only), add its certificate to `certs/https/` on both balancers and reload HAProxy (step 3.12), and add its redirect URIs in Keycloak (step 3.9).
 
 ---
 
@@ -588,15 +619,17 @@ Sign in to the portal as the platform owner and set up, in this order (pages und
 ### 4.1 Health
 
 1. Every ops port on every app VM answers 200 on `/readyz` (step 3.11).
-2. HAProxy stats (`http://LB_1:7000`, user `admin`) show every back end up.
+2. HAProxy stats (`http://LB_1:7000`, user `admin`) show every back end up (`http-api`, `portal`, `vendor-dlr`, `smpp`, the PostgreSQL ones).
 3. `patronictl list` shows one leader, one synchronous standby, one replica.
 4. Sentinel names the primary; `INFO replication` on it shows two replicas.
 5. On a CH replica, `SELECT * FROM system.replicas` shows the `sms` tables healthy (after ch-writer started).
 6. `backup.sh check` passes on the PG leader; `backup.sh list` on CH_1 shows the first full.
-7. The portal loads at the portal address, sign-in goes through Keycloak, and `GET /v1/me` returns the owner:
+7. The portal loads at `https://<portal>`, sign-in goes through Keycloak, and `GET /v1/me` returns the owner:
    ```sh
    curl -s https://<portal>/v1/me -H "Authorization: Bearer <token>"
    ```
+8. HTTPS by name: `http://<portal>` redirects to HTTPS; `https://<API_HOST>/` reaches the HTTP API (send a test message as in [api-reference.md](api-reference.md)); `https://<DLR_HOST>/` answers 404 (only `/dlr/<vendor>` passes). Each name shows its own certificate.
+9. Prometheus (`http://MON_1:9090/targets`) shows every target up, and Alertmanager (`http://MON_1:9093`) is reachable. To test e-mail, stop node-exporter on one VM for 3 minutes: `TargetDown` reaches `ALERT_EMAIL_TO`, then a resolved message when it is back.
 
 ### 4.2 Sign-off stages on the production VMs (before go-live)
 
@@ -627,7 +660,7 @@ From [signoff-5k.md](signoff-5k.md) (application tier):
 
 | Drill | Command | Expected |
 | --- | --- | --- |
-| Kill a connector | on app-1: `docker kill amaze-app-connector-sim-1` | another VM's connector takes the partitions in about 10 s; restart policy brings it back |
+| Kill a connector | on app-1: `docker kill amaze-app-connector-1` | another VM's connector takes the partitions in about 10 s; restart policy brings it back |
 | Kill a Kafka broker | on kafka-2: `docker kill amaze-kafka-redpanda-1`, start it after 2 min | no refused submits; brief latency spike |
 | Kill an SMPP edge | on app-2: `docker kill amaze-app-smpp-server-1` | the load generator's binds on app-2 drop (it connects to the app VMs directly) and those on app-1 keep sending; judge this run on billing and lost messages only |
 | Vendor outage | on sim-1: `docker stop amaze-sim-smpp-sim-1`, start after 60 s | `sms_vendor_routable{vendor="sim"} 0` within about 3 s, traffic moves to `httpsim` |
@@ -724,10 +757,10 @@ There is no written upgrade procedure; this is the order the files allow.
 2. **On every VM:** `cd /opt/amaze && git pull --ff-only`.
 3. **Build** new images with a new `TAG` (or build and push once), as in step 3.3, and set `TAG` in both `.env` files on every VM.
 4. **Migrate** from one app VM: `docker compose -f app.yml --env-file .env --profile init run --rm migrate`. Check the new migration files first; the existing ones only add tables and columns, but each release should be read.
-5. **New topics:** if `deploy/kafka-topics.sh` gained topics, run `topics` again (existing ones are skipped).
+5. **New topics:** if `deploy/kafka-topics.sh` gained topics, run `topics` again (existing ones are skipped). Vendors' route topics are the connector's job.
 6. **Roll the app VMs one at a time**, waiting for every `/readyz` to answer 200 and HAProxy to mark the VM up before the next:
    ```sh
-   NODE=app-1 docker compose -f app.yml --env-file .env --profile admin up -d
+   NODE=app-1 docker compose -f app.yml --env-file .env up -d
    ```
    SMPP binds on the restarted VM drop and reconnect through the balancer; nothing acknowledged is lost (it is in Kafka first).
 7. **Data-tier changes** (`deploy/ha/*`): one node at a time, replicas before the primary/leader.
@@ -747,9 +780,9 @@ No log rotation or shipping is configured in the compose files; set Docker's log
 
 ### 5.6 Scaling
 
-- **App tier:** add an app VM (`APP_4` in `.env`, a `server` line in each `listen` block of `haproxy.cfg`, a Prometheus target), start `app.yml` on it. Kafka spreads partitions over the consumers (24 partitions per topic, so at most 24 consumers per group).
+- **App tier:** add an app VM (`APP_4` in `.env`, a `server` line in each app `listen` and `backend` block of `haproxy.cfg`, a Prometheus target: `render-monitoring` knows `APP_1`–`APP_3` only), start `app.yml` on it. Kafka spreads partitions over the consumers (24 partitions per topic, so at most 24 consumers per group). Every app VM opens every vendor bind, so check each vendor's allowed binds first and reduce bind rows if needed.
 - **One busy service:** the dashboard's "Consumer throughput by group", "Service CPU" and "Host CPU busy" show whether a service is short of CPU (add a VM, or move it to its own) or waiting on Redis or Kafka.
-- **Vendors:** one connector per vendor per app VM; vendor binds and TPS are set per vendor in the portal.
+- **Vendors:** one connector process per app VM runs every vendor; vendor binds and TPS are set per vendor in the portal, and every app VM opens every bind (divide a vendor's allowed binds by the number of app VMs).
 - **Data stores:** sizing knobs in `.env` (`PG_*`, `REDIS_MAXMEMORY`, `REDPANDA_*`); ClickHouse disk grows about 45 GB a day at 5,000 TPS.
 
 ### 5.7 Soak test
@@ -773,15 +806,15 @@ From [phase5-security.md](phase5-security.md):
 - [ ] Every `change-me` replaced; `BACKUP_CIPHER_PASS` kept outside the platform.
 - [ ] etcd authentication on (unauthenticated reads fail), Patroni REST password set (unauthenticated `PATCH /config` gets 401).
 - [ ] Sentinel password set (unauthenticated commands get `NOAUTH`); Redis password set.
-- [ ] Firewall: etcd 2379/2380 and Patroni 8008 reachable only from PG and LB VMs; data-store and ops ports only from the private network; stats and PostgreSQL balancer ports on the private address only.
+- [ ] Firewall: etcd 2379/2380 reachable only from PG and LB VMs, Patroni 8008 only from PG and LB VMs and `MON_1`; data-store, exporter and ops ports only from the private network; only 80, 443, 2775 and 3550 public on the balancers.
 - [ ] `SMPP_PROXY_PROTOCOL_FROM` lists exactly the balancers.
 - [ ] `PPROF` off.
 - [ ] Keycloak: demo user deleted, direct grants off, real redirect URIs (no wildcards), OTP required, staff e-mails verified.
 - [ ] `WEBHOOK_ALLOW_PRIVATE` not set.
-- [ ] TLS in front of the portal and HTTP API (not yet in `haproxy.cfg`), forwarding `X-Forwarded-Proto: https` so admin-api sends HSTS.
+- [ ] A certificate in `deploy/ha/lb/certs/https/` for every HTTPS name, and renewals scheduled (HAProxy reload, step 3.12).
 - [ ] Reseller domains set only by the platform, each with a certificate and Keycloak redirect URIs.
 - [ ] CI `security` job (govulncheck, staticcheck, `npm audit`) green on the release commit.
-- [ ] Known open items accepted: plaintext traffic inside the private network, PE ID first-come registration, e-mail enumeration on user add, audit log takes `X-Forwarded-For` as given, API key revocation takes up to 60 s.
+- [ ] Known open items accepted: plaintext traffic inside the private network, PE ID first-come registration, e-mail enumeration on user add, API key revocation takes up to 60 s. (The audit log takes `X-Forwarded-For` as given; HAProxy overwrites that header, so keep admin-api reachable only through the balancer.)
 
 ---
 
@@ -811,7 +844,7 @@ scripts/dev-local.sh down
 ```
 
 - **Options:** `CHDB_PYTHON=<python with chdb>` adds a ClickHouse stand-in and ch-writer; `CLICKHOUSE_URL=...` uses a real one; `ROUTE=httpsim` sends demo traffic through the HTTP simulator; `PROMETHEUS_BIN=...` starts Prometheus for the live monitor; `SEED_ARGS="-balance 100000000"` for longer runs.
-- **Ports:** SMPP 2775, HTTP 8080, admin API and portal 8081, HTTP-vendor receipts 8090, simulators 2776/2777, ops 9101–9111. Logs in `.dev/logs/`.
+- **Ports:** SMPP 2775, HTTP 8080, admin API and portal 8081, HTTP-vendor receipts 8090, simulators 2776/2777, ops 9101–9107 and 9109–9111 (one connector on 9107 runs every vendor; vendors added in the portal start within 5 s here). Logs in `.dev/logs/`.
 - **Sign-in:** `APP_ENV=dev` without `OIDC_ISSUER`, so the portal lists the seeded users: `ops@amaze.local` (platform), `owner@demo-reseller.local` (reseller), `owner@reseller-shop.local` (its sub-account), `owner@demo-customer.local` (direct customer). Scripts send `X-Actor-Account` / `X-Actor-User` headers instead of a token.
 - **Sending:** SMPP `system_id=demo`, `password=demo123`. Only the registered DLT templates pass (PE `1101234567890123456`, header `AMZTST`, `Your OTP is {#var#}. Do not share it with anyone. -Amaze`); other text to the demo customer is refused `dlt_template`.
 - **HA rehearsal:** `scripts/ha-local.sh up`, then `eval "$(scripts/ha-local.sh env)"; scripts/dev-local.sh up`, then `scripts/ha-drill.sh all` and `scripts/ha-restore-check.sh`. The tools it needs are listed at the top of `scripts/ha-local.sh`.
@@ -824,14 +857,17 @@ scripts/dev-local.sh down
 | A service exits with `secrets: SECRETS_KEY is required outside APP_ENV=dev` | `SECRETS_KEY` missing in `.env`. |
 | `secrets: key must be 64 hex characters` | Generate with `openssl rand -hex 32`. |
 | admin-api exits with `OIDC_ISSUER is required outside APP_ENV=dev` | Add `OIDC_ISSUER` to `.env` (step 3.9). |
-| admin-api logs `OIDC issuer not reachable yet; retrying` | Keycloak unreachable from the app VM, or a wrong realm URL. Set `OIDC_DISCOVERY_URL` (edit `app.yml`) if admin-api must fetch discovery from another address. |
+| admin-api logs `OIDC issuer not reachable yet; retrying` | Keycloak unreachable from the app VM, or a wrong realm URL. Set `OIDC_DISCOVERY_URL` in `.env` if admin-api must fetch discovery from another address. |
 | Portal sign-in: 401 | Wrong or expired token, issuer mismatch (`iss` must equal `OIDC_ISSUER`), or the client is not in `OIDC_AUDIENCE`. |
 | Portal sign-in: 403 | Valid token, but no enabled user for that verified e-mail on an active account: grant one with `admin-user` or the Team page. |
 | Keycloak: invalid redirect URI | Add `https://<domain>/callback/` and `/login/` to `amaze-portal` (step 3.9). |
-| `admin-user`: `no platform account (run migrate and create it first)` | Step 3.10.1. |
+| `admin-user`: `no platform account (run migrate, then admin-user -create-platform <name>)` | Add `-create-platform "<name>"` (step 3.10). |
 | `seed`: `refusing to seed: APP_ENV must be dev or staging` | Intended in production; for a sign-off pass `-e APP_ENV=staging`. |
 | `/readyz` 503 | The JSON body names the dependency (postgres, redis, kafka, clickhouse). |
-| A service exits on start with a topic error, or nothing moves for a vendor | Topics are not auto-created: run `topics`, with `VENDORS` for that vendor (step 3.8). |
+| A service exits on start with a topic error | Topics are not auto-created: run `topics` (step 3.8). |
+| Nothing moves for a new vendor | Wait 30 s. The vendor must not be disabled and needs an enabled bind or an HTTP profile. Look in the connector log for `route topic not created; vendor not started` or `vendor stopped; retrying at the next rescan`. |
+| HAProxy does not start | No PEM in `deploy/ha/lb/certs/https/`, or `certs/smpp.pem` missing. See `docker compose -f lb.yml --env-file .env logs haproxy`. |
+| HTTP vendor's receipts get 404 | The URL must be `https://<DLR_HOST>/dlr/<vendor>?token=…`; the vendor must be running on the connector (not disabled, HTTP profile saved). |
 | `etcdctl auth enable` refused | Grant the root role first: `etcdctl user grant-role root root` (step 3.5). |
 | `pg_wal` keeps growing | The pgBackRest stanza does not exist yet: run `backup.sh init` on the leader. Or archiving fails: `backup.sh check`. |
 | Redis refuses writes (`NOREPLICAS`) | `min-replicas-to-write 1`: the primary sees no replica in sync (both down or more than 10 s behind). Bring a replica back. |
@@ -848,12 +884,10 @@ scripts/dev-local.sh down
 
 Things a production install needs that the repository does not provide yet. Each is noted where it comes up above.
 
-1. **TLS for the portal and HTTP API.** `haproxy.cfg` passes 8080 and 8081 through as plain TCP, and no service terminates HTTPS. [phase4-portals.md](phase4-portals.md) says certificates go on the balancer, and admin-api sends HSTS only when it sees TLS or `X-Forwarded-Proto: https`.
-2. **No platform-account bootstrap for production.** Only devseed creates the platform account, and it refuses `APP_ENV=production`. Step 3.10 uses SQL.
-3. **No connectors for real vendors.** `app.yml` has only `connector-sim` and `connector-httpsim`, and `topics` creates only `sms.route.sim` / `sms.route.httpsim`.
-4. **The HTTP-vendor receipt endpoint (8090) is not on the balancer.** Vendors would have to reach the app VMs directly.
-5. **No production Keycloak deployment.** Only the dev server in `deploy/docker-compose.yml`.
-6. **Monitoring is set up for the sign-off layout.** It has no alert rules and no Alertmanager, and no exporters for PostgreSQL, Redis, ClickHouse or HAProxy. `render-monitoring` leaves out `APP_3` and the HA data and LB VMs.
-7. **`admin-user` has no compose service**, and CI builds images but pushes none. `admin-user`, `billing-check` and `smpp-load` are not in the CI image matrix.
-8. **No production restore-check script.** `scripts/ha-restore-check.sh` works on the local rehearsal tier only.
-9. **No log rotation or shipping.**
+1. **The HA Docker stack has not been run end to end.** See the warning at the top.
+2. **No production Keycloak deployment.** Only the dev server in `deploy/docker-compose.yml`.
+3. **No certificate automation.** Certificates in `deploy/ha/lb/certs/https/` are copied and renewed by hand (no ACME client), on both LB VMs.
+4. **No backup alerts.** The alert rules do not watch PostgreSQL archiving, backup age or ClickHouse `system.backups` (step 3.13).
+5. **CI builds images but pushes none.** Push them yourself, or build on each VM.
+6. **No production restore-check script.** `scripts/ha-restore-check.sh` works on the local rehearsal tier only.
+7. **No log rotation or shipping.**

@@ -49,7 +49,7 @@ function NewVendor({ done }: { done: (id: string) => void }) {
     <Card title="New vendor">
       <form className="form-row" onSubmit={(e) => { e.preventDefault(); a.run(async () => { await send("POST", "/v1/vendors", f); done(f.id); }); }}>
         <Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value, id: f.id || "" })} required /></Field>
-        <Field label="ID" hint="a-z, 0-9, -; names its queue and connector (VENDOR_ID)">
+        <Field label="ID" hint="a-z, 0-9, -; names its queue. Cannot be changed.">
           <Input value={f.id} onChange={(e) => setF({ ...f, id: e.target.value.toLowerCase() })} pattern="[a-z0-9\-]{2,32}" required />
         </Field>
         <Field label="Protocol">

@@ -128,22 +128,16 @@ services:
     build: { context: .., args: { SERVICE: dlr-processor } }
     ports: ["9106:9090"]
 
-  connector-sim:
+  # Runs every vendor configured in the database (sim and httpsim after seeding).
+  connector:
     <<: *service
     build: { context: .., args: { SERVICE: connector } }
     environment:
       <<: *env
-      VENDOR_ID: sim
-    ports: ["9107:9090"]
-
-  connector-httpsim:
-    <<: *service
-    build: { context: .., args: { SERVICE: connector } }
-    environment:
-      <<: *env
-      VENDOR_ID: httpsim
+      VENDOR_ID: "*"
+      VENDOR_RESCAN: 10s
       DLR_ADDR: ":8090"
-    ports: ["9108:9090", "8090:8090"]
+    ports: ["9107:9090", "8090:8090"]
 
   alerter:
     <<: *service
@@ -180,10 +174,10 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
     ports: ["9110:9090"]
 
-  # Fake HTTP vendor; calls back DLRs to connector-httpsim.
+  # Fake HTTP vendor; calls back DLRs to the connector.
   http-sim:
     build: { context: .., args: { SERVICE: http-sim } }
-    command: ["-addr", ":2777", "-dlr-url", "http://connector-httpsim:8090/dlr/httpsim?token=devtoken"]
+    command: ["-addr", ":2777", "-dlr-url", "http://connector:8090/dlr/httpsim?token=devtoken"]
     ports: ["2777:2777"]
 
   # Fake vendor SMSC that answers submits and sends delivery receipts.

@@ -1,7 +1,13 @@
 # Rendered to prometheus.yml by `scripts/signoff.sh render-monitoring`.
+# Jobs whose VMs are not in .env render with no targets.
 global:
   scrape_interval: 5s
   evaluation_interval: 15s
+rule_files: [/etc/prometheus/alerts.yml]
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['127.0.0.1:9093']
 scrape_configs:
   - job_name: platform
     static_configs:
@@ -13,8 +19,7 @@ scrape_configs:
       - { source_labels: [__address__], regex: '.*:9104', target_label: service, replacement: router }
       - { source_labels: [__address__], regex: '.*:9105', target_label: service, replacement: rater }
       - { source_labels: [__address__], regex: '.*:9106', target_label: service, replacement: dlr-processor }
-      - { source_labels: [__address__], regex: '.*:9107', target_label: service, replacement: connector-sim }
-      - { source_labels: [__address__], regex: '.*:9108', target_label: service, replacement: connector-httpsim }
+      - { source_labels: [__address__], regex: '.*:9107', target_label: service, replacement: connector }
       - { source_labels: [__address__], regex: '.*:9109', target_label: service, replacement: webhook-dispatcher }
       - { source_labels: [__address__], regex: '.*:9110', target_label: service, replacement: ch-writer }
       - { source_labels: [__address__], regex: '.*:9111', target_label: service, replacement: alerter }
@@ -25,3 +30,17 @@ scrape_configs:
   - job_name: node
     static_configs:
       - targets: [__NODE_TARGETS__]
+  # HA layout only (deploy/ha): Patroni's own metrics, the Redis exporter,
+  # ClickHouse's built-in endpoint and HAProxy's.
+  - job_name: patroni
+    static_configs:
+      - targets: [__PATRONI_TARGETS__]
+  - job_name: redis
+    static_configs:
+      - targets: [__REDIS_TARGETS__]
+  - job_name: clickhouse
+    static_configs:
+      - targets: [__CH_TARGETS__]
+  - job_name: haproxy
+    static_configs:
+      - targets: [__LB_TARGETS__]

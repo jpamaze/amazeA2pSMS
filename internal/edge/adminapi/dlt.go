@@ -352,7 +352,7 @@ func (a *API) dltReport(w http.ResponseWriter, r *http.Request, act actor) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"account_id": acct, "by": col, "from": from.Format(time.RFC3339),
-		"to": to.Format(time.RFC3339), "rows": out,
+		"to": to.Format(time.RFC3339), "tz": from.Location().String(), "rows": out,
 		"note": "messages refused at submit are not in this report; see sms_refused_total{reason=~\"dlt_.*\"}"})
 }
 

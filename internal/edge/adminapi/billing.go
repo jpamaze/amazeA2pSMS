@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -323,18 +324,41 @@ func (a *API) transfer(w http.ResponseWriter, r *http.Request, act actor) {
 	}
 }
 
-// period reads ?from=&to= (RFC 3339 or YYYY-MM-DD); defaults to the current month.
+// zoneRe limits ?tz= to IANA names (they go into ClickHouse queries).
+var zoneRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$`)
+
+// zone reads ?tz= (an IANA name such as Asia/Kolkata); the default is UTC.
+func zone(r *http.Request) (*time.Location, error) {
+	name := r.URL.Query().Get("tz")
+	if name == "" {
+		return time.UTC, nil
+	}
+	if !zoneRe.MatchString(name) {
+		return nil, fmt.Errorf("tz: use an IANA time zone such as UTC or Asia/Kolkata")
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("tz: unknown time zone %q", name)
+	}
+	return loc, nil
+}
+
+// period reads ?from=&to= (RFC 3339, or YYYY-MM-DD as midnight in ?tz=,
+// default UTC); defaults to the current month in that zone.
 func period(r *http.Request) (time.Time, time.Time, error) {
-	now := time.Now().UTC()
-	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	loc, err := zone(r)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	now := time.Now().In(loc)
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
 	to := now
 	parse := func(s string) (time.Time, error) {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
 			return t, nil
 		}
-		return time.Parse("2006-01-02", s)
+		return time.ParseInLocation("2006-01-02", s, loc)
 	}
-	var err error
 	if s := r.URL.Query().Get("from"); s != "" {
 		if from, err = parse(s); err != nil {
 			return from, to, fmt.Errorf("from: use RFC 3339 or YYYY-MM-DD")
@@ -348,7 +372,7 @@ func period(r *http.Request) (time.Time, time.Time, error) {
 	if !to.After(from) {
 		return from, to, fmt.Errorf("to must be after from")
 	}
-	return from, to, nil
+	return from.In(loc), to.In(loc), nil
 }
 
 // statement lists ledger entries in a period with opening and closing balances.
@@ -399,7 +423,7 @@ func (a *API) statement(w http.ResponseWriter, r *http.Request, act actor) {
 			writeDBErr(w, err)
 			return
 		}
-		lines = append(lines, line{At: at.UTC().Format(time.RFC3339), Kind: kind, Amount: amt.StringFixed(4),
+		lines = append(lines, line{At: at.In(from.Location()).Format(time.RFC3339), Kind: kind, Amount: amt.StringFixed(4),
 			Balance: bal.StringFixed(4), Reference: ref, Messages: qty, Counterparty: cp})
 		totals[kind] = totals[kind].Add(amt)
 		closing = bal
@@ -424,7 +448,7 @@ func (a *API) statement(w http.ResponseWriter, r *http.Request, act actor) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account_id": id, "from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339),
+		"account_id": id, "from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339), "tz": from.Location().String(),
 		"opening_balance": opening.StringFixed(4), "closing_balance": closing.StringFixed(4),
 		"totals": t, "entries": lines,
 	})
@@ -448,7 +472,7 @@ func (a *API) usage(w http.ResponseWriter, r *http.Request, act actor) {
 	}
 	// id is a validated UUID (managedOrSelf checked it against the database).
 	rows, err := a.CH.Query(r.Context(), fmt.Sprintf(`
-		SELECT toString(toDate(accepted_at)) AS day,
+		SELECT toString(toDate(accepted_at, '%[4]s')) AS day,
 		       countIf(account_id = toUUID('%[1]s')) AS sent,
 		       sumIf(segments, account_id = toUUID('%[1]s')) AS segments,
 		       countIf(account_id = toUUID('%[1]s') AND status = 'delivered') AS delivered,
@@ -457,7 +481,7 @@ func (a *API) usage(w http.ResponseWriter, r *http.Request, act actor) {
 		       toString(sum(charges['%[1]s'])) AS charged
 		FROM message_records FINAL
 		WHERE accepted_at >= %[2]s AND accepted_at < %[3]s AND mapContains(charges, '%[1]s')
-		GROUP BY day ORDER BY day`, id, chTime(from), chTime(to)))
+		GROUP BY day ORDER BY day`, id, chTime(from), chTime(to), from.Location().String()))
 	if err != nil {
 		a.Log.Error("usage query", "err", err)
 		writeErr(w, http.StatusServiceUnavailable, "usage store unavailable")
@@ -471,7 +495,8 @@ func (a *API) usage(w http.ResponseWriter, r *http.Request, act actor) {
 		out = append(out, map[string]string{"day": row[0], "sent": row[1], "segments": row[2], "delivered": row[3],
 			"not_delivered": row[4], "via_sub_accounts": row[5], "charged": row[6]})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"account_id": id, "from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339), "days": out})
+	writeJSON(w, http.StatusOK, map[string]any{"account_id": id, "from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339),
+		"tz": from.Location().String(), "days": out})
 }
 
 // csvText keeps free text (references other accounts typed) from being run

@@ -3,14 +3,16 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { get } from "@/lib/api";
-import { money, when } from "@/lib/format";
+import { money } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { useData } from "@/lib/use";
+import { shortZone, useTimeZone, whenIn } from "@/lib/tz";
 import { Shell } from "@/components/Shell";
 import { Badge, Card, Loading, Notice } from "@/components/ui";
 
 function View() {
   const { me } = useSession();
+  const [tz] = useTimeZone();
   const id = useSearchParams().get("id") ?? "";
   const acct = useSearchParams().get("account") ?? me?.account_id;
   const { data, error, loading } = useData(
@@ -27,8 +29,8 @@ function View() {
         ["Sender", m.sender],
         ["Parts", m.segments],
         ["Price", money(m.price)],
-        ["Accepted", when(m.accepted_at)],
-        ["Completed", when(m.done_at)],
+        [`Accepted (${shortZone(tz)})`, whenIn(m.accepted_at, tz)],
+        [`Completed (${shortZone(tz)})`, whenIn(m.done_at, tz)],
         ["Network (MCC/MNC)", `${m.mcc ?? ""} / ${m.mnc ?? ""}`],
         ["DLT PE ID", m.pe_id || "—"],
         ["DLT template", m.template_id || "—"],

@@ -53,7 +53,11 @@ func ConsumeBatch(ctx context.Context, d *Deps, group string, topics []string, m
 	// Polls block rebalances until released; Close waits for that, so release
 	// on every exit path or shutdown hangs.
 	defer cl.AllowRebalance()
-	d.Health.Add("kafka-consumer", kafka.Ping(cl))
+	// One check per group: a process can run several consumers (the
+	// connector runs one per vendor) and stop some of them.
+	check := "kafka-consumer:" + group
+	d.Health.Add(check, kafka.Ping(cl))
+	defer d.Health.Remove(check)
 	d.Log.Info("consuming", "group", group, "topics", topics)
 
 	for {

@@ -101,7 +101,7 @@ func (a *API) createVendor(w http.ResponseWriter, r *http.Request, act actor) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": req.ID, "status": "paused",
-		"next": "add binds (SMPP) or the HTTP profile, start a connector with VENDOR_ID=" + req.ID + ", import costs, then activate"})
+		"next": "add binds (SMPP) or the HTTP profile (the connectors start it within 30 seconds), import costs, then activate"})
 }
 
 func (a *API) getVendor(w http.ResponseWriter, r *http.Request, act actor) {
@@ -289,7 +289,7 @@ func (a *API) addBind(w http.ResponseWriter, r *http.Request, act actor) {
 		writeDBErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "note": "the vendor's connector picks up bind changes when it restarts"})
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "note": "the connectors apply bind changes within 30 seconds (the vendor reconnects)"})
 }
 
 func (a *API) disableBind(w http.ResponseWriter, r *http.Request, act actor) {
@@ -306,7 +306,7 @@ func (a *API) disableBind(w http.ResponseWriter, r *http.Request, act actor) {
 		writeErr(w, http.StatusNotFound, "no enabled bind with this id")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "note": "takes effect when the connector restarts"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "note": "the connectors apply it within 30 seconds (the vendor reconnects)"})
 }
 
 // putHTTPProfile sets an HTTP vendor's request and receipt mapping,
@@ -385,7 +385,7 @@ func (a *API) putHTTPProfile(w http.ResponseWriter, r *http.Request, act actor) 
 		writeDBErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "note": "the vendor's connector picks it up when it restarts"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "note": "the connectors apply it within 30 seconds"})
 }
 
 func (a *API) listVendorCosts(w http.ResponseWriter, r *http.Request, act actor) {

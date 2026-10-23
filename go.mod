@@ -13,6 +13,7 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/shopspring/decimal v1.6.0
 	github.com/twmb/franz-go v1.22.2
+	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261018232743-f49d7ddc2cb4
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sync v0.24.0

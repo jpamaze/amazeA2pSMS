@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	_ "time/tzdata" // report time zones (?tz=) without zoneinfo in the image
 
 	"github.com/caarlos0/env/v11"
 

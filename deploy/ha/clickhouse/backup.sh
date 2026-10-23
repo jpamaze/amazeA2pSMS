@@ -10,8 +10,8 @@ set -euo pipefail
 : "${S3_ENDPOINT:?}" "${S3_BUCKET:?}" "${S3_ACCESS_KEY:?}" "${S3_SECRET_KEY:?}"
 KEEP=${BACKUP_KEEP_DAYS:-35}
 NOW=$(date -u +%Y%m%dT%H%M%SZ)
-S3URL="https://${S3_ENDPOINT}/${S3_BUCKET}/clickhouse"
-[ "${S3_URI_STYLE:-host}" = host ] && S3URL="https://${S3_BUCKET}.${S3_ENDPOINT}/clickhouse"
+S3URL="https://${S3_ENDPOINT}:${S3_PORT:-443}/${S3_BUCKET}/clickhouse"
+[ "${S3_URI_STYLE:-host}" = host ] && S3URL="https://${S3_BUCKET}.${S3_ENDPOINT}:${S3_PORT:-443}/clickhouse"
 q() { clickhouse client --password "${CLICKHOUSE_PASSWORD}" --user sms -q "$1"; }
 s3() { echo "S3('$S3URL/$1', '${S3_ACCESS_KEY}', '${S3_SECRET_KEY}')"; }
 latest_full() { ls -1 /backup/clickhouse | grep -- '-full$' | sort | tail -1; }

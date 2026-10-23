@@ -55,7 +55,7 @@ function View() {
                   { key: "rerouted", label: "Rerouted", align: "right", render: (r) => count(r.rerouted) },
                 ]} />
               </div>
-            ) : <p className="muted small">No connector is reporting. Start one with VENDOR_ID={v.id}.</p>}
+            ) : <p className="muted small">No connector is reporting. Connectors start a vendor within 30 seconds once it has an enabled bind or an HTTP profile and is not disabled.</p>}
           </Card>
           <Tabs value={tab} onChange={setTab} tabs={[
             { id: "setup", label: v.protocol === "smpp" ? "SMPP binds" : "HTTP profile" },

@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { download, get, qs } from "@/lib/api";
-import { count, istDate, money, pct, when } from "@/lib/format";
+import { count, money, pct } from "@/lib/format";
+import { dateIn, shortZone, useTimeZone, whenIn } from "@/lib/tz";
 import { useSession } from "@/lib/session";
 import { AccountPicker } from "@/components/AccountPicker";
 import { BarChart } from "@/components/Chart";
 import { Shell } from "@/components/Shell";
+import { TimeZoneField } from "@/components/TimeZone";
 import { Badge, Button, Card, Field, Input, Notice, Select, Stat, Table, Tabs, useAction } from "@/components/ui";
 
 type UsageDay = { day: string; sent: string; segments: string; delivered: string; not_delivered: string; via_sub_accounts: string; charged: string };
@@ -30,10 +32,10 @@ function fillDays(rows: UsageDay[], from: string, to: string): UsageDay[] {
 
 // statementRows keeps top-ups, transfers and refunds as they are and folds
 // charges (one ledger entry per rater batch, thousands a day) into one row
-// per IST day. The CSV download keeps every entry.
-function statementRows(entries: Entry[]): Entry[] {
+// per day in tz. The CSV download keeps every entry.
+function statementRows(entries: Entry[], tz: string): Entry[] {
   const out: Entry[] = [];
-  const day = (at: string) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date(at));
+  const day = (at: string) => new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date(at));
   let cur: Entry | null = null;
   let curDay = "";
   for (const e of entries) {
@@ -62,8 +64,10 @@ export default function Reports() {
   const { me } = useSession();
   const [tab, setTab] = useState("usage");
   const [acct, setAcct] = useState("");
-  const [from, setFrom] = useState(istDate(-30));
-  const [to, setTo] = useState(istDate(1));
+  const [tz, setTz] = useTimeZone();
+  const [from, setFrom] = useState(dateIn("UTC", -30));
+  const [to, setTo] = useState(dateIn("UTC", 1));
+  const [touched, setTouched] = useState(false); // dates follow the zone until edited
   const [by, setBy] = useState("template");
   const [usage, setUsage] = useState<UsageDay[] | null>(null);
   const [stmt, setStmt] = useState<Statement | null>(null);
@@ -71,16 +75,22 @@ export default function Reports() {
   const act = useAction();
   useEffect(() => { if (me && !acct) setAcct(new URLSearchParams(window.location.search).get("account") ?? me.account_id); }, [me, acct]);
 
-  async function run() {
+  async function run(from_ = from, to_ = to) {
     if (!acct) return;
-    const p = qs({ from, to });
+    const [from, to] = [from_, to_];
+    const p = qs({ from, to, tz });
     await act.run(async () => {
       if (tab === "usage") setUsage((await get<{ days: UsageDay[] }>(`/v1/accounts/${acct}/usage${p}`)).days);
       if (tab === "statement") setStmt(await get<Statement>(`/v1/accounts/${acct}/statement${p}`));
-      if (tab === "dlt") setDlt((await get<{ rows: DLTRow[] }>(`/v1/accounts/${acct}/dlt/report${qs({ from, to, by })}`)).rows);
+      if (tab === "dlt") setDlt((await get<{ rows: DLTRow[] }>(`/v1/accounts/${acct}/dlt/report${qs({ from, to, tz, by })}`)).rows);
     });
   }
-  useEffect(() => { run(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, acct]);
+  useEffect(() => {
+    if (touched) { run(); return; }
+    const [f, t] = [dateIn(tz, -30), dateIn(tz, 1)];
+    setFrom(f); setTo(t); run(f, t);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [tab, acct, tz]);
 
   const sum = (k: keyof UsageDay) => (usage ?? []).reduce((s, d) => s + Number(d[k]), 0);
   return (
@@ -89,8 +99,9 @@ export default function Reports() {
       <Card>
         <form className="form-row" onSubmit={(e) => { e.preventDefault(); run(); }}>
           <AccountPicker value={acct} onChange={setAcct} />
-          <Field label="From"><Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
-          <Field label="To (exclusive)"><Input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+          <Field label="From"><Input type="date" value={from} onChange={(e) => { setFrom(e.target.value); setTouched(true); }} /></Field>
+          <Field label="To (exclusive)"><Input type="date" value={to} onChange={(e) => { setTo(e.target.value); setTouched(true); }} /></Field>
+          <TimeZoneField value={tz} onChange={setTz} />
           {tab === "dlt" && (
             <Field label="Group by">
               <Select value={by} onChange={(e) => setBy(e.target.value)}>
@@ -103,7 +114,7 @@ export default function Reports() {
           )}
           <Button type="submit" busy={act.busy}>Show</Button>
           {tab === "statement" && (
-            <Button type="button" kind="secondary" onClick={() => act.run(() => download(`/v1/accounts/${acct}/statement${qs({ from, to, format: "csv" })}`, `statement-${from}.csv`))}>
+            <Button type="button" kind="secondary" onClick={() => act.run(() => download(`/v1/accounts/${acct}/statement${qs({ from, to, tz, format: "csv" })}`, `statement-${from}.csv`))}>
               Download CSV
             </Button>
           )}
@@ -132,7 +143,7 @@ export default function Reports() {
           </Card>
           <Card pad={false}>
             <Table rows={usage} columns={[
-              { key: "day", label: "Day (IST)" },
+              { key: "day", label: `Day (${shortZone(tz)})` },
               { key: "sent", label: "Messages", align: "right", render: (d) => count(d.sent) },
               { key: "segments", label: "Parts", align: "right", render: (d) => count(d.segments) },
               { key: "delivered", label: "Delivered", align: "right", render: (d) => `${count(d.delivered)} (${pct(+d.delivered, +d.sent)})` },
@@ -152,8 +163,8 @@ export default function Reports() {
             {Object.entries(stmt.totals).map(([k, v]) => <Stat key={k} label={k.replace("_", " ")} value={money(v)} />)}
           </div>
           <Card pad={false}>
-            <Table rows={statementRows(stmt.entries)} empty="No entries in this period" columns={[
-              { key: "at", label: "When", render: (e) => when(e.at) },
+            <Table rows={statementRows(stmt.entries, tz)} empty="No entries in this period" columns={[
+              { key: "at", label: `When (${shortZone(tz)})`, render: (e) => whenIn(e.at, tz) },
               { key: "kind", label: "Kind", render: (e) => <Badge tone={Number(e.amount) >= 0 ? "good" : "muted"}>{e.kind}</Badge> },
               { key: "amount", label: "Amount", align: "right", render: (e) => money(e.amount) },
               { key: "balance_after", label: "Balance", align: "right", render: (e) => money(e.balance_after) },

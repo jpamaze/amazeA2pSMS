@@ -1,7 +1,10 @@
-# Prometheus + Grafana on MON_1. Render the Prometheus config first:
+# Prometheus, Alertmanager and Grafana on MON_1. Render the configs first
+# (from .env: scrape targets, SMTP and where alerts go):
 #   ../../scripts/signoff.sh render-monitoring
 #   docker compose -f monitoring.yml --env-file .env up -d
 # Grafana: http://MON_1:3000 (admin / GRAFANA_ADMIN_PASSWORD), dashboard "SMS sign-off".
+# Alerts: monitoring/alerts.yml, e-mailed to ALERT_EMAIL_TO (and posted to
+# ALERT_WEBHOOK_URL if set); Alertmanager UI http://MON_1:9093.
 name: amaze-monitoring
 services:
   prometheus:
@@ -11,7 +14,16 @@ services:
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - promdata:/prometheus
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    network_mode: host
+    restart: unless-stopped
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - amdata:/alertmanager
   grafana:
     image: grafana/grafana:11.2.0
     network_mode: host
@@ -23,3 +35,4 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
 volumes:
   promdata:
+  amdata:

@@ -90,7 +90,7 @@ up)
   if [ -n "${PROMETHEUS_BIN:-}" ]; then
     mkdir -p "$ROOT/.dev/prom"
     printf 'global: {scrape_interval: 5s}\nscrape_configs:\n  - job_name: platform\n    static_configs: [{targets: [%s]}]\n' \
-      "$(printf '"localhost:%s",' 9101 9102 9103 9104 9105 9106 9107 9108 9109 9110 | sed 's/,$//')" > "$ROOT/.dev/prom/prometheus.yml"
+      "$(printf '"localhost:%s",' 9101 9102 9103 9104 9105 9106 9107 9109 9110 9111 | sed 's/,$//')" > "$ROOT/.dev/prom/prometheus.yml"
     start prometheus "$PROMETHEUS_BIN" --config.file="$ROOT/.dev/prom/prometheus.yml" --storage.tsdb.path="$ROOT/.dev/prom/data" \
       --web.listen-address=:9090 --log.level=warn
   fi
@@ -101,10 +101,11 @@ up)
   start router        OPS_ADDR=:9104 "$B/router"
   start rater         OPS_ADDR=:9105 "$B/rater"
   start dlr-processor OPS_ADDR=:9106 DLR_TIMEOUT="${DLR_TIMEOUT:-72h}" "$B/dlr-processor"
-  start connector-sim OPS_ADDR=:9107 VENDOR_ID=sim "$B/connector"
-  start connector-httpsim OPS_ADDR=:9108 VENDOR_ID=httpsim DLR_ADDR=:8090 "$B/connector"
+  # One connector runs every vendor (sim and httpsim from devseed, and any
+  # added in the portal within VENDOR_RESCAN).
+  start connector     OPS_ADDR=:9107 VENDOR_ID='*' VENDOR_RESCAN=5s DLR_ADDR=:8090 "$B/connector"
   start webhook-dispatcher OPS_ADDR=:9109 WEBHOOK_ALLOW_PRIVATE=true "$B/webhook-dispatcher"
-  ports="9101 9102 9103 9104 9105 9106 9107 9108 9109 9111"
+  ports="9101 9102 9103 9104 9105 9106 9107 9109 9111"
   if [ -n "$CH_URL" ]; then
     start ch-writer OPS_ADDR=:9110 CLICKHOUSE_URL="$CH_URL" "$B/ch-writer"
     ports="$ports 9110"

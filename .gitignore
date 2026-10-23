@@ -9,6 +9,7 @@ deploy/vm/.env
 deploy/vm/reports/*.json
 deploy/vm/reports/since.txt
 deploy/vm/monitoring/prometheus.yml
+deploy/vm/monitoring/alertmanager.yml
 
 # Redis snapshot when redis-server runs from the repo; binaries from `go build ./cmd/<name>` at the root
 dump.rdb
@@ -16,3 +17,4 @@ dump.rdb
 
 # TLS keys for the load balancers
 deploy/ha/lb/certs/*.pem
+deploy/ha/lb/certs/https/*.pem

@@ -12,12 +12,12 @@ Slice 2 covers the security audit and the 10,000 TPS 24-hour soak.
 | VMs | Runs | Fails over by | Compose file |
 | --- | --- | --- | --- |
 | pg-1..3 | PostgreSQL 16 under Patroni, etcd, pgBackRest | Patroni promotes the synchronous replica (etcd decides the leader) | `deploy/ha/postgres.yml` |
-| redis-1..3 | Redis 7.2 + Sentinel | Sentinel (quorum 2 of 3) promotes a replica; clients follow it | `deploy/ha/redis.yml` |
+| redis-1..3 | Redis 7.2 + Sentinel, redis_exporter (metrics) | Sentinel (quorum 2 of 3) promotes a replica; clients follow it | `deploy/ha/redis.yml` |
 | ch-1..3 | ClickHouse 24.8, one shard, three replicas, embedded Keeper | none needed: every replica holds all data; the platform moves to another replica | `deploy/ha/clickhouse.yml` |
 | kafka-1..3 | Redpanda, replication 3 | Raft leader election per partition | `deploy/vm/kafka.yml` |
 | app-1..3 | every platform service | the load balancer drops a VM whose `/readyz` fails; Kafka moves its partitions | `deploy/vm/app.yml` |
-| lb-1..2 | HAProxy + keepalived (virtual IP) | VRRP moves the IP; on a public cloud use its network load balancer instead | `deploy/ha/lb.yml` |
-| mon-1 | Prometheus, Grafana | — | `deploy/vm/monitoring.yml` |
+| lb-1..2 | HAProxy (HTTPS on 443 by host name: HTTP API, HTTP-vendor receipts, portal; SMPP; PostgreSQL for operators) + keepalived (virtual IP) | VRRP moves the IP; on a public cloud use its network load balancer instead | `deploy/ha/lb.yml` |
+| mon-1 | Prometheus, Alertmanager (alerts by e-mail), Grafana | — | `deploy/vm/monitoring.yml` |
 
 Put the three VMs of each tier in different availability zones (or racks). `deploy/ha/env.example` lists every address and secret; the same `.env` goes on every VM.
 
@@ -84,7 +84,7 @@ Every store backs up to both destinations. Each is a complete copy, so either al
    ```
    This creates the pgBackRest stanza in both repositories and takes the first full backups. WAL archiving starts once the stanza exists (until then PostgreSQL keeps the WAL).
 4. Install `deploy/ha/backup.cron` on the VMs it names.
-5. Alert on backups: `pg_stat_archiver.failed_count` rising, `backup.sh info` older than 8 days, and `system.backups` errors.
+5. Alert on backups: `pg_stat_archiver.failed_count` rising, `backup.sh info` older than 8 days, and `system.backups` errors. The rules in `deploy/vm/monitoring/alerts.yml` do not cover backups yet, so add a check of your own.
 
 ### Restoring
 

@@ -13,7 +13,7 @@ Documentation: [admin user guide](docs/admin-guide.md), [setup and installation 
 | `cmd/smpp-server`, `cmd/http-api` | Customer edges: auth, limits, balance hold, write to Kafka |
 | `cmd/admin-api` | Accounts, top-ups, credit limits, rate cards, SMPP credentials, API keys, webhooks (dev only until auth) |
 | `cmd/router` | Picks a vendor (LCR / priority / weighted) |
-| `cmd/connector` | Sends to one vendor (`VENDOR_ID`) over SMPP or HTTP; journals its DLRs |
+| `cmd/connector` | Sends to vendors over SMPP or HTTP and journals their DLRs. `VENDOR_ID=*` (default) runs every vendor that is not disabled and has an enabled bind or HTTP profile, picks up portal changes within `VENDOR_RESCAN` (30 s) and creates each vendor's route topic; `VENDOR_ID=<id>` runs one vendor |
 | `cmd/webhook-dispatcher` | Signed delivery-status webhooks to HTTP customers, with retries |
 | `cmd/ch-writer` | Message history to ClickHouse |
 | `cmd/dlr-processor` | Matches DLRs, message state, customer receipts, expiry of messages with no DLR |
@@ -21,7 +21,7 @@ Documentation: [admin user guide](docs/admin-guide.md), [setup and installation 
 | `cmd/migrate` | Applies `migrations/postgres` |
 | `cmd/devkafka`, `cmd/smpp-sim`, `cmd/http-sim`, `cmd/smpp-load`, `cmd/devseed` | Dev tools: in-memory Kafka, SMPP and HTTP vendor simulators, load generator, demo data |
 | `cmd/billing-check`, `scripts/signoff.sh`, `deploy/vm/` | 5,000 TPS sign-off kit for plain VMs ([docs/signoff-5k.md](docs/signoff-5k.md)) |
-| `cmd/admin-user` | Grants the first platform owner (then use the admin API) |
+| `cmd/admin-user` | Creates the platform account on a new installation (`-create-platform`) and grants the first platform owner (then use the admin API) |
 | `internal/smpp/{pdu,session,gsm7}` | Own SMPP 3.3/3.4/5.0 library and GSM-7/UCS-2 encoding |
 | `internal/ingest`, `internal/msgstore`, `internal/routing`, `internal/connector`, `internal/dlr` | Message path packages |
 | `internal/billing/wallet` | Redis Lua holds: available = balance + credit limit − holds |
@@ -68,7 +68,7 @@ curl localhost:8080/v1/sms/<id> -H "X-API-Key: <key>"
 
 Portal: build it once (`cd portal && npm ci && npm run build`), then open http://localhost:8081 (dev sign-in lists the seeded users).
 
-Ports: SMPP 2775, HTTP 8080, admin API and portal 8081, HTTP-vendor DLR callback 8090, SMPP simulator 2776, HTTP simulator 2777, ClickHouse 8123, ops (`/healthz`, `/readyz`, `/metrics`) 9101–9110.
+Ports: SMPP 2775, HTTP 8080, admin API and portal 8081, HTTP-vendor DLR callback 8090, SMPP simulator 2776, HTTP simulator 2777, ClickHouse 8123, ops (`/healthz`, `/readyz`, `/metrics`) 9101–9107 and 9109–9111 (one connector on 9107 runs every vendor).
 
 Without Docker, ClickHouse is optional: `pip install chdb` into a virtualenv and run `CHDB_PYTHON=<that python> scripts/dev-local.sh up` to add a ClickHouse stand-in and the ch-writer. `ROUTE=httpsim` sends the demo customer's traffic through the HTTP vendor simulator.
 

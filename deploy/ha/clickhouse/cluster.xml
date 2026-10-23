@@ -2,6 +2,14 @@
      in each server (quorum 2 of 3). Values come from the environment. -->
 <clickhouse>
   <listen_host>0.0.0.0</listen_host>
+  <!-- Metrics for Prometheus on MON_1. -->
+  <prometheus>
+    <endpoint>/metrics</endpoint>
+    <port>9363</port>
+    <metrics>true</metrics>
+    <events>true</events>
+    <asynchronous_metrics>true</asynchronous_metrics>
+  </prometheus>
   <interserver_http_host from_env="SELF"/>
   <macros>
     <shard>01</shard>

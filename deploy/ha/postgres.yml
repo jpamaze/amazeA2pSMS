@@ -8,7 +8,8 @@
 #   docker compose -f postgres.yml --env-file .env exec etcd sh -c \
 #     'etcdctl user add root --new-user-password="$ETCD_ROOT_PASSWORD" &&
 #      etcdctl user grant-role root root && etcdctl auth enable'
-# Firewall 2379/2380 (etcd) and 8008 (Patroni) to the PG and LB VMs only.
+# Firewall 2379/2380 (etcd) to the PG VMs and 8008 (Patroni) to the PG, LB and
+# MON VMs only (Prometheus reads its /metrics).
 # After the first start, on the leader (patronictl list):
 #   docker compose -f postgres.yml --env-file .env exec patroni /etc/amaze/backup.sh init
 name: amaze-pg
@@ -60,6 +61,7 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_URI_STYLE: ${S3_URI_STYLE:-host}
+      S3_VERIFY_TLS: ${S3_VERIFY_TLS:-y}
       BACKUP_CIPHER_PASS: ${BACKUP_CIPHER_PASS}
       BACKUP_RETENTION_FULL_S3: ${BACKUP_RETENTION_FULL_S3:-4}
       BACKUP_RETENTION_FULL_NFS: ${BACKUP_RETENTION_FULL_NFS:-2}
